@@ -5,7 +5,7 @@ a = Analysis(
     ['app\\png_transparency_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('app\\ChromaForge_logo.png', '.')],
+    datas=[('app\\ChromaForge_logo.png', '.'), ('app\\ChromaForge_logo.ico', '.'), ('C:\\Users\\TA-Ko\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python311\\site-packages\\tkinterdnd2\\tkdnd', 'tkinterdnd2\\tkdnd')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

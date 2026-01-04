@@ -8,19 +8,28 @@ import queue
 import shutil
 import traceback
 import sys
+import math
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+except Exception:
+    TkinterDnD = None
+    DND_FILES = None
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageTk
 except Exception as exc:
     Image = None
+    ImageTk = None
     PIL_IMPORT_ERROR = exc
 else:
     PIL_IMPORT_ERROR = None
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_NAME = "ChromaForge"
+APP_VERSION = "Beta 2.1"
+APP_TITLE = f"{APP_NAME} - {APP_VERSION}"
 THEMES = ["Light", "Dark"]
 def get_app_home():
     if getattr(sys, "frozen", False):
@@ -87,7 +96,7 @@ def build_prefix_regex(prefixes):
     if not prefixes:
         return None
     escaped = [re.escape(p) for p in prefixes]
-    return re.compile(r"^(?:" + "|".join(escaped) + r")_\d+_")
+    return re.compile(r"^(?P<prefix>" + "|".join(escaped) + r")_\d+_")
 
 
 def process_image(in_path, out_path, mode, target_rgbs, replace_pair, fill_color, fill_shadows, dry_run):
@@ -138,11 +147,59 @@ def process_image(in_path, out_path, mode, target_rgbs, replace_pair, fill_color
     return converted
 
 
-def output_filename(name, prefix_re):
+def output_filename(name, prefix_re, keep_prefixes):
     base, ext = os.path.splitext(name)
-    if prefix_re is not None:
+    if prefix_re is not None and not keep_prefixes:
         base = prefix_re.sub("", base)
     return base + ext
+
+
+def output_prefix_folder(name, prefix_re):
+    if prefix_re is None:
+        return "needs_sorting"
+    base = os.path.splitext(name)[0]
+    match = prefix_re.match(base)
+    if not match:
+        return "needs_sorting"
+    return match.group("prefix").lower()
+
+
+def extract_group_prefix(name):
+    base = os.path.splitext(name)[0]
+    parts = re.split(r"[-_]", base)
+    if not parts:
+        return base
+    first = parts[0].strip()
+    if not first:
+        return base
+    if first.isdigit() and len(parts) > 1:
+        second = parts[1].strip()
+        if second:
+            second_upper = second.upper()
+            if re.fullmatch(r"F\d+", second_upper) or second_upper in {"N", "E", "S", "W"} or second.isdigit():
+                return first
+            if re.search(r"[A-Z]", second_upper):
+                return second
+    return first
+
+
+def sprite_sort_key(name):
+    base = os.path.splitext(name)[0]
+    base_upper = base.upper()
+    direction_match = re.search(r"(?:^|[-_])(N|E|S|W)(?:$|[-_])", base_upper)
+    direction = direction_match.group(1) if direction_match else ""
+    direction_order = {"N": 0, "E": 1, "S": 2, "W": 3}
+    direction_index = direction_order.get(direction, 99)
+
+    frame_match = re.search(r"(?:^|[-_])F(\d+)(?:$|[-_])", base_upper)
+    if frame_match:
+        return (0, direction_index, int(frame_match.group(1)), base_upper)
+
+    number_match = re.search(r"(?:^|[-_])(\d+)(?:$)", base_upper)
+    if number_match:
+        return (1, int(number_match.group(1)), base_upper)
+
+    return (2, base_upper)
 
 
 def ensure_csv_header(path):
@@ -205,9 +262,10 @@ class Tooltip:
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title(APP_NAME)
+        self.root.title(APP_TITLE)
         self.queue = queue.Queue()
         self.running = False
+        self.previewing = False
         self.window_size = None
         self._resize_save_after_id = None
         icon_path = resource_path(ICON_ICO)
@@ -223,6 +281,7 @@ class App:
         self.replace_from_var = tk.StringVar(value="")
         self.replace_to_var = tk.StringVar(value="")
         self.extra_prefix_var = tk.StringVar(value="")
+        self.keep_prefixes_var = tk.BooleanVar(value=False)
         self.process_all_var = tk.BooleanVar(value=True)
         self.skip_existing_var = tk.BooleanVar(value=True)
         self.skip_existing_files_var = tk.BooleanVar(value=False)
@@ -235,16 +294,47 @@ class App:
         self.tooltips_enabled_var = tk.BooleanVar(value=True)
         self.theme_var = tk.StringVar(value="Light")
         self.theme_colors = {}
+        self.sprite_layout_var = tk.StringVar(value="Grid")
+        self.sprite_columns_var = tk.IntVar(value=4)
+        self.sprite_padding_mode_var = tk.StringVar(value="Fixed")
+        self.sprite_padding_var = tk.IntVar(value=1)
+        self.sheet_running = False
+        self.tile_layout_var = tk.StringVar(value="Grid")
+        self.tile_columns_var = tk.IntVar(value=15)
+        self.tile_size_var = tk.IntVar(value=32)
+        self.tile_export_meta_var = tk.BooleanVar(value=True)
+        self.tile_running = False
+        self.layout_type_var = tk.StringVar(value="Spritesheet")
+        self.layout_folder_var = tk.StringVar(value="")
+        self.layout_output_var = tk.StringVar(value="")
+        self.layout_mode_var = tk.StringVar(value="Grid")
+        self.layout_grid_columns_var = tk.IntVar(value=4)
+        self.layout_grid_rows_var = tk.IntVar(value=0)
+        self.layout_snap_var = tk.BooleanVar(value=True)
+        self.layout_show_grid_var = tk.BooleanVar(value=True)
+        self.layout_show_guides_var = tk.BooleanVar(value=False)
+        self.tile_size_mode_var = tk.StringVar(value="Force")
+        self.layout_recent_json_var = tk.StringVar(value="")
+        self.layout_recent_json_paths = []
+        self.layout_dnd_ready = False
+        self.layout_items = {}
+        self.layout_selected_ids = set()
+        self.layout_drag_start = None
+        self.layout_drag_positions = {}
+        self.layout_pos_x_var = tk.StringVar(value="")
+        self.layout_pos_y_var = tk.StringVar(value="")
+        self.layout_zoom = 1.0
 
         self.prefix_vars = {}
-        for name in DEFAULT_PREFIXES:
-            self.prefix_vars[name] = tk.BooleanVar(value=True)
+        self.conflict_event = threading.Event()
+        self.conflict_choice = None
 
         self.folder_rows = {}
 
         self._build_ui()
         self.refresh_folders()
         self.load_last_settings()
+        self.refresh_layout_folders()
         self.poll_queue()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -254,12 +344,36 @@ class App:
         self.style = ttk.Style()
         self.apply_theme(self.theme_var.get())
 
-        main = ttk.Frame(root, padding=10)
-        main.grid(row=0, column=0, sticky="nsew")
+        notebook = ttk.Notebook(root)
+        notebook.grid(row=0, column=0, sticky="nsew")
 
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
+        root.rowconfigure(1, weight=0)
+
+        color_tab = ttk.Frame(notebook)
+        sheet_tab = ttk.Frame(notebook)
+        tile_tab = ttk.Frame(notebook)
+        layout_tab = ttk.Frame(notebook)
+        notebook.add(color_tab, text="Color Mode")
+        notebook.add(sheet_tab, text="Spritesheet Mode")
+        notebook.add(tile_tab, text="Tilemap Mode")
+        notebook.add(layout_tab, text="Layout Editor")
+
+        footer = ttk.Frame(root)
+        footer.grid(row=1, column=0, sticky="ew")
+        footer.columnconfigure(0, weight=1)
+        ttk.Label(footer, text=f"Version: {APP_VERSION}").grid(row=0, column=0, sticky="e", padx=10, pady=(0, 6))
+
+        main = ttk.Frame(color_tab, padding=10)
+        main.grid(row=0, column=0, sticky="nsew")
+        color_tab.columnconfigure(0, weight=1)
+        color_tab.rowconfigure(0, weight=1)
         main.columnconfigure(1, weight=1)
+
+        self.main_sheet_tab = sheet_tab
+        self.main_tile_tab = tile_tab
+        self.main_layout_tab = layout_tab
 
         preset_frame = ttk.Frame(main)
         preset_frame.grid(row=0, column=0, columnspan=3, sticky="ew")
@@ -318,19 +432,24 @@ class App:
         self.replace_to_swatch = tk.Label(color_frame, width=3, relief="sunken")
         self.replace_to_swatch.grid(row=2, column=6, padx=4)
 
-        prefix_frame = ttk.LabelFrame(main, text="Prefixes to Remove")
+        prefix_frame = ttk.LabelFrame(main, text="Prefixes")
         prefix_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=6)
-        pf_inner = ttk.Frame(prefix_frame)
-        pf_inner.grid(row=0, column=0, sticky="ew", padx=6, pady=4)
+        prefix_controls = ttk.Frame(prefix_frame)
+        prefix_controls.grid(row=0, column=0, sticky="ew", padx=6, pady=(4, 0))
+        self.scan_prefixes_button = ttk.Button(prefix_controls, text="Scan for prefixes", command=self.scan_prefixes)
+        self.scan_prefixes_button.grid(row=0, column=0, sticky="w")
+        self.keep_prefixes_check = ttk.Checkbutton(prefix_controls, text="Keep prefixes", variable=self.keep_prefixes_var)
+        self.keep_prefixes_check.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        prefix_controls.columnconfigure(2, weight=1)
 
-        col = 0
-        for name in DEFAULT_PREFIXES:
-            ttk.Checkbutton(pf_inner, text=name, variable=self.prefix_vars[name]).grid(row=0, column=col, padx=4, sticky="w")
-            col += 1
+        self.prefix_list_frame = ttk.Frame(prefix_frame)
+        self.prefix_list_frame.grid(row=1, column=0, sticky="ew", padx=6, pady=4)
+        self.prefix_empty_label = ttk.Label(self.prefix_list_frame, text="No prefixes detected. Click Scan for prefixes.")
+        self.prefix_empty_label.grid(row=0, column=0, sticky="w")
 
-        ttk.Label(prefix_frame, text="Extra prefixes (comma-separated)").grid(row=1, column=0, sticky="w", padx=6)
+        ttk.Label(prefix_frame, text="Extra prefixes (comma-separated)").grid(row=2, column=0, sticky="w", padx=6)
         self.extra_prefix_entry = ttk.Entry(prefix_frame, textvariable=self.extra_prefix_var)
-        self.extra_prefix_entry.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 6))
+        self.extra_prefix_entry.grid(row=3, column=0, sticky="ew", padx=6, pady=(0, 6))
         prefix_frame.columnconfigure(0, weight=1)
 
         folders_frame = ttk.Frame(main)
@@ -370,7 +489,7 @@ class App:
 
         options_frame = ttk.LabelFrame(main, text="Options")
         options_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=4)
-        skip_existing_btn = ttk.Checkbutton(options_frame, text="Skip folders that already exist in New (default)", variable=self.skip_existing_var)
+        skip_existing_btn = ttk.Checkbutton(options_frame, text="Skip prefix folders that already exist in New (default)", variable=self.skip_existing_var)
         skip_existing_btn.grid(row=0, column=0, sticky="w")
         skip_files_btn = ttk.Checkbutton(options_frame, text="Skip files that already exist in New", variable=self.skip_existing_files_var)
         skip_files_btn.grid(row=1, column=0, sticky="w")
@@ -393,11 +512,13 @@ class App:
         run_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=6)
         self.run_button = ttk.Button(run_frame, text="Run", command=self.run)
         self.run_button.grid(row=0, column=0, sticky="w")
+        self.preview_button = ttk.Button(run_frame, text="Preview Routing", command=self.preview_routing)
+        self.preview_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
         self.progress = ttk.Progressbar(run_frame, length=240)
-        self.progress.grid(row=0, column=1, padx=10)
+        self.progress.grid(row=0, column=2, padx=10)
         self.status_label = ttk.Label(run_frame, text="")
-        self.status_label.grid(row=0, column=2, sticky="w")
-        run_frame.columnconfigure(1, weight=1)
+        self.status_label.grid(row=0, column=3, sticky="w")
+        run_frame.columnconfigure(2, weight=1)
 
         log_frame = ttk.LabelFrame(main, text="Log")
         log_frame.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=6)
@@ -411,7 +532,322 @@ class App:
 
         main.rowconfigure(8, weight=1)
 
+        sheet_main = ttk.Frame(self.main_sheet_tab, padding=10)
+        sheet_main.grid(row=0, column=0, sticky="nsew")
+        self.main_sheet_tab.columnconfigure(0, weight=1)
+        self.main_sheet_tab.rowconfigure(0, weight=1)
+        sheet_main.columnconfigure(1, weight=1)
+
+        ttk.Label(sheet_main, text="Input Folder").grid(row=0, column=0, sticky="w")
+        ttk.Entry(sheet_main, textvariable=self.input_var).grid(row=0, column=1, sticky="ew", padx=5)
+        ttk.Button(sheet_main, text="Browse", command=self.pick_input).grid(row=0, column=2)
+
+        sheet_layout = ttk.LabelFrame(sheet_main, text="Layout")
+        sheet_layout.grid(row=1, column=0, columnspan=3, sticky="ew", pady=6)
+        ttk.Label(sheet_layout, text="Mode").grid(row=0, column=0, sticky="w", padx=6, pady=2)
+        self.sprite_layout_combo = ttk.Combobox(
+            sheet_layout,
+            textvariable=self.sprite_layout_var,
+            values=["Grid", "Horizontal", "Vertical"],
+            state="readonly",
+            width=12,
+        )
+        self.sprite_layout_combo.grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(sheet_layout, text="Columns").grid(row=0, column=2, sticky="w", padx=6)
+        self.sprite_columns_spin = ttk.Spinbox(sheet_layout, from_=1, to=20, textvariable=self.sprite_columns_var, width=6)
+        self.sprite_columns_spin.grid(row=0, column=3, sticky="w", padx=6, pady=2)
+        ttk.Label(sheet_layout, text="Padding").grid(row=0, column=4, sticky="w", padx=6)
+        self.sprite_padding_mode_combo = ttk.Combobox(
+            sheet_layout,
+            textvariable=self.sprite_padding_mode_var,
+            values=["Fixed", "Frame width", "Frame height"],
+            state="readonly",
+            width=12,
+        )
+        self.sprite_padding_mode_combo.grid(row=0, column=5, sticky="w", padx=6, pady=2)
+        self.sprite_padding_spin = ttk.Spinbox(sheet_layout, from_=0, to=128, textvariable=self.sprite_padding_var, width=6)
+        self.sprite_padding_spin.grid(row=0, column=6, sticky="w", padx=6, pady=2)
+        sheet_layout.columnconfigure(7, weight=1)
+
+        ttk.Label(sheet_main, text="Exclude folders (comma-separated)").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(sheet_main, textvariable=self.exclude_folders_var).grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        sheet_run_frame = ttk.Frame(sheet_main)
+        sheet_run_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=6)
+        self.sheet_run_button = ttk.Button(sheet_run_frame, text="Generate Sprite Sheets", command=self.run_sprite_sheets)
+        self.sheet_run_button.grid(row=0, column=0, sticky="w")
+        self.sheet_progress = ttk.Progressbar(sheet_run_frame, length=240, mode="indeterminate")
+        self.sheet_progress.grid(row=0, column=1, padx=10)
+        self.sheet_status_label = ttk.Label(sheet_run_frame, text="")
+        self.sheet_status_label.grid(row=0, column=2, sticky="w")
+        sheet_run_frame.columnconfigure(1, weight=1)
+
+        sheet_log_frame = ttk.LabelFrame(sheet_main, text="Log")
+        sheet_log_frame.grid(row=5, column=0, columnspan=3, sticky="nsew", pady=6)
+        sheet_log_frame.rowconfigure(0, weight=1)
+        sheet_log_frame.columnconfigure(0, weight=1)
+        self.sheet_log = tk.Text(sheet_log_frame, height=12, wrap="none")
+        self.sheet_log.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        sheet_log_scroll = ttk.Scrollbar(sheet_log_frame, orient="vertical", command=self.sheet_log.yview)
+        sheet_log_scroll.grid(row=0, column=1, sticky="ns")
+        self.sheet_log.configure(yscrollcommand=sheet_log_scroll.set)
+        sheet_main.rowconfigure(5, weight=1)
+
+        tile_main = ttk.Frame(self.main_tile_tab, padding=10)
+        tile_main.grid(row=0, column=0, sticky="nsew")
+        self.main_tile_tab.columnconfigure(0, weight=1)
+        self.main_tile_tab.rowconfigure(0, weight=1)
+        tile_main.columnconfigure(1, weight=1)
+
+        ttk.Label(tile_main, text="Input Folder").grid(row=0, column=0, sticky="w")
+        ttk.Entry(tile_main, textvariable=self.input_var).grid(row=0, column=1, sticky="ew", padx=5)
+        ttk.Button(tile_main, text="Browse", command=self.pick_input).grid(row=0, column=2)
+
+        tile_layout = ttk.LabelFrame(tile_main, text="Layout")
+        tile_layout.grid(row=1, column=0, columnspan=3, sticky="ew", pady=6)
+        ttk.Label(tile_layout, text="Mode").grid(row=0, column=0, sticky="w", padx=6, pady=2)
+        self.tile_layout_combo = ttk.Combobox(
+            tile_layout,
+            textvariable=self.tile_layout_var,
+            values=["Grid", "Horizontal", "Vertical"],
+            state="readonly",
+            width=12,
+        )
+        self.tile_layout_combo.grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(tile_layout, text="Columns").grid(row=0, column=2, sticky="w", padx=6)
+        self.tile_columns_combo = ttk.Combobox(
+            tile_layout,
+            textvariable=self.tile_columns_var,
+            values=[10, 15, 20, 25],
+            state="readonly",
+            width=6,
+        )
+        self.tile_columns_combo.grid(row=0, column=3, sticky="w", padx=6, pady=2)
+        ttk.Label(tile_layout, text="Tile size").grid(row=0, column=4, sticky="w", padx=6)
+        self.tile_size_combo = ttk.Combobox(
+            tile_layout,
+            textvariable=self.tile_size_var,
+            values=[8, 16, 32, 64],
+            state="readonly",
+            width=6,
+        )
+        self.tile_size_combo.grid(row=0, column=5, sticky="w", padx=6, pady=2)
+        tile_layout.columnconfigure(6, weight=1)
+
+        ttk.Checkbutton(tile_main, text="Export metadata (CSV)", variable=self.tile_export_meta_var).grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(tile_main, text="Exclude folders (comma-separated)").grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(tile_main, textvariable=self.exclude_folders_var).grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        tile_run_frame = ttk.Frame(tile_main)
+        tile_run_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=6)
+        self.tile_run_button = ttk.Button(tile_run_frame, text="Generate Tilemaps", command=self.run_tilemaps)
+        self.tile_run_button.grid(row=0, column=0, sticky="w")
+        self.tile_progress = ttk.Progressbar(tile_run_frame, length=240, mode="indeterminate")
+        self.tile_progress.grid(row=0, column=1, padx=10)
+        self.tile_status_label = ttk.Label(tile_run_frame, text="")
+        self.tile_status_label.grid(row=0, column=2, sticky="w")
+        tile_run_frame.columnconfigure(1, weight=1)
+
+        tile_log_frame = ttk.LabelFrame(tile_main, text="Log")
+        tile_log_frame.grid(row=6, column=0, columnspan=3, sticky="nsew", pady=6)
+        tile_log_frame.rowconfigure(0, weight=1)
+        tile_log_frame.columnconfigure(0, weight=1)
+        self.tile_log = tk.Text(tile_log_frame, height=12, wrap="none")
+        self.tile_log.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        tile_log_scroll = ttk.Scrollbar(tile_log_frame, orient="vertical", command=self.tile_log.yview)
+        tile_log_scroll.grid(row=0, column=1, sticky="ns")
+        self.tile_log.configure(yscrollcommand=tile_log_scroll.set)
+        tile_main.rowconfigure(6, weight=1)
+
+        layout_main = ttk.Frame(self.main_layout_tab, padding=10)
+        layout_main.grid(row=0, column=0, sticky="nsew")
+        self.main_layout_tab.columnconfigure(0, weight=1)
+        self.main_layout_tab.rowconfigure(0, weight=1)
+        layout_main.columnconfigure(1, weight=1)
+
+        ttk.Label(layout_main, text="Input Folder").grid(row=0, column=0, sticky="w")
+        ttk.Entry(layout_main, textvariable=self.input_var).grid(row=0, column=1, sticky="ew", padx=5)
+        ttk.Button(layout_main, text="Browse", command=self.pick_input).grid(row=0, column=2)
+
+        ttk.Label(layout_main, text="Source Folder").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.layout_folder_combo = ttk.Combobox(layout_main, textvariable=self.layout_folder_var, state="readonly")
+        self.layout_folder_combo.grid(row=1, column=1, sticky="ew", padx=5, pady=(4, 0))
+        ttk.Button(layout_main, text="Refresh", command=self.refresh_layout_folders).grid(row=1, column=2, pady=(4, 0))
+
+        ttk.Label(layout_main, text="Type").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self.layout_type_combo = ttk.Combobox(
+            layout_main,
+            textvariable=self.layout_type_var,
+            values=["Spritesheet", "Tilemap"],
+            state="readonly",
+            width=14,
+        )
+        self.layout_type_combo.grid(row=2, column=1, sticky="w", padx=5, pady=(4, 0))
+
+        layout_body = ttk.Frame(layout_main)
+        layout_body.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=8)
+        layout_body.columnconfigure(1, weight=1)
+        layout_body.rowconfigure(0, weight=1)
+        layout_main.rowconfigure(3, weight=1)
+
+        layout_list_frame = ttk.LabelFrame(layout_body, text="Frames")
+        layout_list_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        layout_list_frame.rowconfigure(1, weight=1)
+        layout_list_frame.columnconfigure(0, weight=1)
+        self.layout_listbox = tk.Listbox(layout_list_frame, selectmode="extended", height=18)
+        self.layout_listbox.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
+        layout_list_scroll = ttk.Scrollbar(layout_list_frame, orient="vertical", command=self.layout_listbox.yview)
+        layout_list_scroll.grid(row=1, column=1, sticky="ns", pady=6)
+        self.layout_listbox.configure(yscrollcommand=layout_list_scroll.set)
+        layout_list_buttons = ttk.Frame(layout_list_frame)
+        layout_list_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
+        ttk.Button(layout_list_buttons, text="Add Selected", command=self.layout_add_selected).grid(row=0, column=0, padx=3)
+        ttk.Button(layout_list_buttons, text="Remove Selected", command=self.layout_remove_selected).grid(row=0, column=1, padx=3)
+        ttk.Button(layout_list_buttons, text="Clear Canvas", command=self.layout_clear_canvas).grid(row=0, column=2, padx=3)
+
+        layout_canvas_frame = ttk.LabelFrame(layout_body, text="Canvas")
+        layout_canvas_frame.grid(row=0, column=1, sticky="nsew")
+        layout_canvas_frame.rowconfigure(0, weight=1)
+        layout_canvas_frame.columnconfigure(0, weight=1)
+        self.layout_canvas = tk.Canvas(layout_canvas_frame, width=520, height=360, highlightthickness=1)
+        self.layout_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        layout_canvas_scroll_y = ttk.Scrollbar(layout_canvas_frame, orient="vertical", command=self.layout_canvas.yview)
+        layout_canvas_scroll_y.grid(row=0, column=1, sticky="ns", pady=6)
+        layout_canvas_scroll_x = ttk.Scrollbar(layout_canvas_frame, orient="horizontal", command=self.layout_canvas.xview)
+        layout_canvas_scroll_x.grid(row=1, column=0, sticky="ew", padx=6)
+        self.layout_canvas.configure(yscrollcommand=layout_canvas_scroll_y.set, xscrollcommand=layout_canvas_scroll_x.set)
+
+        layout_options = ttk.LabelFrame(layout_body, text="Layout Options")
+        layout_options.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
+        layout_options.columnconfigure(1, weight=1)
+        self.layout_name_label = ttk.Label(layout_options, text="Spritesheet name")
+        self.layout_name_label.grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
+        ttk.Entry(layout_options, textvariable=self.layout_output_var).grid(row=0, column=1, columnspan=3, sticky="ew", padx=6, pady=(6, 2))
+        ttk.Label(layout_options, text="Mode").grid(row=1, column=0, sticky="w", padx=6, pady=2)
+        self.layout_mode_combo = ttk.Combobox(
+            layout_options,
+            textvariable=self.layout_mode_var,
+            values=["Grid", "Free-form"],
+            state="readonly",
+            width=12,
+        )
+        self.layout_mode_combo.grid(row=1, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(layout_options, text="Columns").grid(row=2, column=0, sticky="w", padx=6, pady=2)
+        self.layout_columns_spin = ttk.Spinbox(layout_options, from_=1, to=50, textvariable=self.layout_grid_columns_var, width=6)
+        self.layout_columns_spin.grid(row=2, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(layout_options, text="Rows (0=auto)").grid(row=3, column=0, sticky="w", padx=6, pady=2)
+        self.layout_rows_spin = ttk.Spinbox(layout_options, from_=0, to=200, textvariable=self.layout_grid_rows_var, width=6)
+        self.layout_rows_spin.grid(row=3, column=1, sticky="w", padx=6, pady=2)
+        ttk.Checkbutton(layout_options, text="Snap to grid", variable=self.layout_snap_var, command=self.layout_snap_selected).grid(row=4, column=0, columnspan=2, sticky="w", padx=6, pady=2)
+        ttk.Checkbutton(layout_options, text="Show grid lines", variable=self.layout_show_grid_var, command=self.layout_redraw).grid(row=5, column=0, columnspan=2, sticky="w", padx=6, pady=2)
+        ttk.Checkbutton(layout_options, text="Show guides", variable=self.layout_show_guides_var, command=self.layout_redraw).grid(row=6, column=0, columnspan=2, sticky="w", padx=6, pady=2)
+
+        layout_pos_frame = ttk.LabelFrame(layout_options, text="Position")
+        layout_pos_frame.grid(row=7, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
+        ttk.Label(layout_pos_frame, text="X").grid(row=0, column=0, sticky="w", padx=6, pady=2)
+        self.layout_pos_x_entry = ttk.Entry(layout_pos_frame, textvariable=self.layout_pos_x_var, width=8)
+        self.layout_pos_x_entry.grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(layout_pos_frame, text="Y").grid(row=0, column=2, sticky="w", padx=6, pady=2)
+        self.layout_pos_y_entry = ttk.Entry(layout_pos_frame, textvariable=self.layout_pos_y_var, width=8)
+        self.layout_pos_y_entry.grid(row=0, column=3, sticky="w", padx=6, pady=2)
+        ttk.Button(layout_pos_frame, text="Apply", command=self.layout_apply_position).grid(row=0, column=4, sticky="w", padx=6, pady=2)
+
+        layout_align_frame = ttk.Frame(layout_options)
+        layout_align_frame.grid(row=8, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
+        ttk.Button(layout_align_frame, text="Align Horizontal", command=lambda: self.layout_align("horizontal")).grid(row=0, column=0, padx=3)
+        ttk.Button(layout_align_frame, text="Align Vertical", command=lambda: self.layout_align("vertical")).grid(row=0, column=1, padx=3)
+        ttk.Button(layout_align_frame, text="Center in Cell", command=self.layout_center_in_cell).grid(row=0, column=2, padx=3)
+        ttk.Button(layout_align_frame, text="Copy Selected", command=self.layout_copy_selected).grid(row=0, column=3, padx=3)
+        ttk.Button(layout_align_frame, text="Remove Selected", command=self.layout_remove_selected).grid(row=0, column=4, padx=3)
+
+        self.layout_sprite_options = ttk.LabelFrame(layout_options, text="Spritesheet")
+        self.layout_sprite_options.grid(row=9, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
+        ttk.Label(self.layout_sprite_options, text="Padding").grid(row=0, column=0, sticky="w", padx=6, pady=2)
+        self.layout_sprite_padding_combo = ttk.Combobox(
+            self.layout_sprite_options,
+            textvariable=self.sprite_padding_mode_var,
+            values=["Fixed", "Frame width", "Frame height"],
+            state="readonly",
+            width=12,
+        )
+        self.layout_sprite_padding_combo.grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        self.layout_sprite_padding_spin = ttk.Spinbox(self.layout_sprite_options, from_=0, to=128, textvariable=self.sprite_padding_var, width=6)
+        self.layout_sprite_padding_spin.grid(row=0, column=2, sticky="w", padx=6, pady=2)
+
+        self.layout_tile_options = ttk.LabelFrame(layout_options, text="Tilemap")
+        self.layout_tile_options.grid(row=10, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
+        ttk.Label(self.layout_tile_options, text="Tile size mode").grid(row=0, column=0, sticky="w", padx=6, pady=2)
+        self.layout_tile_size_mode_combo = ttk.Combobox(
+            self.layout_tile_options,
+            textvariable=self.tile_size_mode_var,
+            values=["Force", "Per-tile"],
+            state="readonly",
+            width=10,
+        )
+        self.layout_tile_size_mode_combo.grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(self.layout_tile_options, text="Tile size").grid(row=0, column=2, sticky="w", padx=6, pady=2)
+        self.layout_tile_size_combo = ttk.Combobox(
+            self.layout_tile_options,
+            textvariable=self.tile_size_var,
+            values=[8, 16, 32, 64],
+            state="readonly",
+            width=6,
+        )
+        self.layout_tile_size_combo.grid(row=0, column=3, sticky="w", padx=6, pady=2)
+        ttk.Checkbutton(self.layout_tile_options, text="Export metadata (CSV)", variable=self.tile_export_meta_var).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=2)
+
+        layout_recent_frame = ttk.LabelFrame(layout_options, text="Recent JSON")
+        layout_recent_frame.grid(row=11, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
+        layout_recent_frame.columnconfigure(1, weight=1)
+        ttk.Label(layout_recent_frame, text="File").grid(row=0, column=0, sticky="w", padx=6, pady=2)
+        self.layout_recent_combo = ttk.Combobox(
+            layout_recent_frame,
+            textvariable=self.layout_recent_json_var,
+            state="readonly",
+            width=26,
+        )
+        self.layout_recent_combo.grid(row=0, column=1, sticky="ew", padx=6, pady=2)
+        ttk.Button(layout_recent_frame, text="Load", command=self.layout_load_recent_json).grid(row=0, column=2, padx=6, pady=2)
+
+        layout_action_frame = ttk.Frame(layout_options)
+        layout_action_frame.grid(row=12, column=0, columnspan=2, sticky="ew", padx=6, pady=(8, 6))
+        ttk.Button(layout_action_frame, text="Load Layout", command=self.layout_load).grid(row=0, column=0, padx=3)
+        ttk.Button(layout_action_frame, text="Save Layout", command=self.layout_save).grid(row=0, column=1, padx=3)
+        self.layout_export_button = ttk.Button(layout_action_frame, text="Export", command=self.layout_export)
+        self.layout_export_button.grid(row=0, column=2, padx=3)
+        self.layout_status_label = ttk.Label(layout_action_frame, text="")
+        self.layout_status_label.grid(row=0, column=3, sticky="w", padx=(8, 0))
+
+        self.sprite_layout_combo.bind("<<ComboboxSelected>>", lambda _e: self.update_sprite_layout_controls())
+        self.sprite_padding_mode_combo.bind("<<ComboboxSelected>>", lambda _e: self.update_sprite_padding_controls())
+        self.tile_layout_combo.bind("<<ComboboxSelected>>", lambda _e: self.update_tile_layout_controls())
+        self.layout_type_combo.bind("<<ComboboxSelected>>", lambda _e: self.update_layout_type_controls())
+        self.layout_folder_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_layout_files())
+        self.layout_mode_combo.bind("<<ComboboxSelected>>", lambda _e: self.layout_redraw())
+        self.layout_columns_spin.bind("<FocusOut>", lambda _e: self.layout_redraw())
+        self.layout_rows_spin.bind("<FocusOut>", lambda _e: self.layout_redraw())
+        self.layout_tile_size_mode_combo.bind("<<ComboboxSelected>>", lambda _e: self.update_layout_type_controls())
+        self.layout_tile_size_combo.bind("<<ComboboxSelected>>", lambda _e: self.layout_redraw())
+        self.layout_sprite_padding_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: (self.update_sprite_padding_controls(), self.layout_redraw()),
+        )
+        self.layout_sprite_padding_spin.bind("<FocusOut>", lambda _e: self.layout_redraw())
+        self.layout_listbox.bind("<<ListboxSelect>>", lambda _e: self.layout_maybe_set_output_name())
+        self.layout_pos_x_entry.bind("<Return>", lambda _e: self.layout_apply_position())
+        self.layout_pos_y_entry.bind("<Return>", lambda _e: self.layout_apply_position())
+        self.layout_canvas.bind("<ButtonPress-1>", self.layout_on_press)
+        self.layout_canvas.bind("<B1-Motion>", self.layout_on_drag)
+        self.layout_canvas.bind("<ButtonRelease-1>", self.layout_on_release)
+        self.layout_canvas.bind("<MouseWheel>", self.layout_on_mousewheel)
+        self.setup_layout_dnd()
+
         self.update_color_mode()
+        self.update_sprite_layout_controls()
+        self.update_sprite_padding_controls()
+        self.update_tile_layout_controls()
+        self.update_layout_type_controls()
+        self.layout_redraw()
         self.bind_color_swatch_updates()
         self.setup_tooltips(
             transparent_radio,
@@ -422,6 +858,9 @@ class App:
             skip_files_btn,
             dry_run_btn,
             tooltips_btn,
+            self.preview_button,
+            self.scan_prefixes_button,
+            self.keep_prefixes_check,
         )
         self.theme_var.trace_add("write", lambda *_: self.on_theme_change())
         self.root.bind("<Configure>", self.on_root_configure)
@@ -512,6 +951,14 @@ class App:
 
         if hasattr(self, "log"):
             self.log.configure(background=colors["log_bg"], foreground=colors["log_fg"], insertbackground=colors["log_fg"])
+        if hasattr(self, "sheet_log"):
+            self.sheet_log.configure(background=colors["log_bg"], foreground=colors["log_fg"], insertbackground=colors["log_fg"])
+        if hasattr(self, "tile_log"):
+            self.tile_log.configure(background=colors["log_bg"], foreground=colors["log_fg"], insertbackground=colors["log_fg"])
+        if hasattr(self, "layout_canvas"):
+            self.layout_canvas.configure(background=colors["entry_bg"], highlightbackground=colors["border"], highlightcolor=colors["border"])
+        if hasattr(self, "layout_listbox"):
+            self.layout_listbox.configure(background=colors["entry_bg"], foreground=colors["entry_fg"])
         if hasattr(self, "folders_box"):
             self.folders_box.configure(background=colors["bg"], highlightbackground=colors["border"], highlightcolor=colors["border"], highlightthickness=1)
         if hasattr(self, "folders_canvas"):
@@ -555,6 +1002,916 @@ class App:
             self.replace_to_entry.configure(state="normal")
         self.update_swatches()
 
+    def update_sprite_layout_controls(self):
+        mode = self.sprite_layout_var.get()
+        if mode == "Grid":
+            self.sprite_columns_spin.configure(state="normal")
+        else:
+            self.sprite_columns_spin.configure(state="disabled")
+
+    def update_sprite_padding_controls(self):
+        mode = self.sprite_padding_mode_var.get()
+        state = "normal" if mode == "Fixed" else "disabled"
+        self.sprite_padding_spin.configure(state=state)
+        if hasattr(self, "layout_sprite_padding_spin"):
+            self.layout_sprite_padding_spin.configure(state=state)
+
+    def update_tile_layout_controls(self):
+        mode = self.tile_layout_var.get()
+        if mode == "Grid":
+            self.tile_columns_combo.configure(state="readonly")
+        else:
+            self.tile_columns_combo.configure(state="disabled")
+
+    def update_layout_mode_controls(self):
+        mode = self.layout_mode_var.get()
+        if mode == "Grid":
+            self.layout_columns_spin.configure(state="normal")
+            self.layout_rows_spin.configure(state="normal")
+        else:
+            self.layout_columns_spin.configure(state="disabled")
+            self.layout_rows_spin.configure(state="disabled")
+
+    def update_layout_tile_size_controls(self):
+        if self.tile_size_mode_var.get() == "Force":
+            self.layout_tile_size_combo.configure(state="readonly")
+        else:
+            self.layout_tile_size_combo.configure(state="disabled")
+
+    def update_layout_type_controls(self):
+        if self.layout_type_var.get() == "Spritesheet":
+            if hasattr(self, "layout_name_label"):
+                self.layout_name_label.configure(text="Spritesheet name")
+            self.layout_sprite_options.grid()
+            self.layout_tile_options.grid_remove()
+            self.layout_export_button.configure(text="Export Spritesheet")
+        else:
+            if hasattr(self, "layout_name_label"):
+                self.layout_name_label.configure(text="Tilemap name")
+            self.layout_tile_options.grid()
+            self.layout_sprite_options.grid_remove()
+            self.layout_export_button.configure(text="Export Tilemap")
+            if not self.layout_output_var.get().strip():
+                folder_path = self.layout_get_folder_path()
+                if folder_path:
+                    self.layout_output_var.set(os.path.basename(folder_path))
+        self.update_layout_mode_controls()
+        self.update_sprite_padding_controls()
+        self.update_layout_tile_size_controls()
+        self.layout_refresh_recent_jsons()
+        self.layout_redraw()
+
+    def layout_get_folder_path(self):
+        input_root = self.input_var.get().strip()
+        folder = self.layout_folder_var.get().strip()
+        if not input_root or not folder:
+            return ""
+        if folder in (".", "./"):
+            return input_root
+        return os.path.join(input_root, folder)
+
+    def layout_refresh_recent_jsons(self):
+        if not hasattr(self, "layout_recent_combo"):
+            return
+        input_root = self.input_var.get().strip()
+        if not os.path.isdir(input_root):
+            self.layout_recent_combo["values"] = []
+            self.layout_recent_json_var.set("")
+            self.layout_recent_json_paths = []
+            return
+        target_dir = "sprite_sheets" if self.layout_type_var.get() == "Spritesheet" else "tilemaps"
+        entries = []
+        for root, _dirs, files in os.walk(input_root):
+            if os.path.basename(root).lower() != target_dir:
+                continue
+            for file in files:
+                if not file.lower().endswith(".json"):
+                    continue
+                path = os.path.join(root, file)
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    mtime = 0
+                entries.append((mtime, path))
+        entries.sort(key=lambda item: item[0], reverse=True)
+        entries = entries[:30]
+        labels = []
+        paths = []
+        for _mtime, path in entries:
+            try:
+                label = os.path.relpath(path, input_root)
+            except ValueError:
+                label = os.path.basename(path)
+            labels.append(label)
+            paths.append(path)
+        self.layout_recent_combo["values"] = labels
+        self.layout_recent_json_paths = paths
+        if labels:
+            if self.layout_recent_json_var.get() not in labels:
+                self.layout_recent_json_var.set(labels[0])
+        else:
+            self.layout_recent_json_var.set("")
+
+    def refresh_layout_folders(self):
+        input_root = self.input_var.get().strip()
+        self.layout_folder_combo["values"] = []
+        if not os.path.isdir(input_root):
+            self.layout_folder_var.set("")
+            self.layout_listbox.delete(0, tk.END)
+            return
+        folders = []
+        for root, dirs, files in os.walk(input_root):
+            dirs[:] = [d for d in dirs if d not in ("sprite_sheets", "tilemaps")]
+            if any(file.lower().endswith(".png") for file in files):
+                rel = os.path.relpath(root, input_root)
+                folders.append("." if rel == "." else rel)
+        folders.sort(key=str.lower)
+        self.layout_folder_combo["values"] = folders
+        if self.layout_folder_var.get() not in folders:
+            self.layout_folder_var.set(folders[0] if folders else "")
+        self.refresh_layout_files()
+        self.layout_refresh_recent_jsons()
+
+    def refresh_layout_files(self):
+        folder_path = self.layout_get_folder_path()
+        self.layout_listbox.delete(0, tk.END)
+        if not folder_path or not os.path.isdir(folder_path):
+            return
+        files = [f for f in os.listdir(folder_path) if f.lower().endswith(".png")]
+        files.sort(key=str.lower)
+        for file in files:
+            self.layout_listbox.insert(tk.END, file)
+        self.layout_clear_canvas()
+        if self.layout_type_var.get() == "Tilemap" and not self.layout_output_var.get().strip():
+            self.layout_output_var.set(os.path.basename(folder_path))
+        self.layout_refresh_recent_jsons()
+
+    def layout_maybe_set_output_name(self):
+        if self.layout_output_var.get().strip():
+            return
+        selections = self.layout_listbox.curselection()
+        if not selections:
+            return
+        file = self.layout_listbox.get(selections[0])
+        if self.layout_type_var.get() == "Spritesheet":
+            self.layout_output_var.set(extract_group_prefix(file))
+        else:
+            folder_path = self.layout_get_folder_path()
+            if folder_path:
+                self.layout_output_var.set(os.path.basename(folder_path))
+
+    def layout_update_position_fields(self):
+        if not self.layout_selected_ids:
+            self.layout_pos_x_var.set("")
+            self.layout_pos_y_var.set("")
+            return
+        xs = {int(self.layout_items[item_id]["x"]) for item_id in self.layout_selected_ids}
+        ys = {int(self.layout_items[item_id]["y"]) for item_id in self.layout_selected_ids}
+        self.layout_pos_x_var.set(str(xs.pop()) if len(xs) == 1 else "")
+        self.layout_pos_y_var.set(str(ys.pop()) if len(ys) == 1 else "")
+
+    def layout_apply_position(self):
+        if not self.layout_selected_ids:
+            return
+        x_text = self.layout_pos_x_var.get().strip()
+        y_text = self.layout_pos_y_var.get().strip()
+        try:
+            x_val = int(x_text) if x_text else None
+            y_val = int(y_text) if y_text else None
+        except ValueError:
+            messagebox.showerror("Invalid position", "X and Y must be whole numbers.")
+            return
+        for item_id in self.layout_selected_ids:
+            item = self.layout_items[item_id]
+            new_x = item["x"] if x_val is None else x_val
+            new_y = item["y"] if y_val is None else y_val
+            item["x"] = new_x
+            item["y"] = new_y
+            canvas_x, canvas_y = self.layout_to_canvas(new_x, new_y)
+            self.layout_canvas.coords(item_id, canvas_x, canvas_y)
+            if item.get("rect_id"):
+                width = item["width"] * self.layout_zoom
+                height = item["height"] * self.layout_zoom
+                self.layout_canvas.coords(item["rect_id"], canvas_x, canvas_y, canvas_x + width, canvas_y + height)
+        if self.layout_snap_var.get() and self.layout_mode_var.get() == "Grid":
+            self.layout_snap_selected()
+        self.layout_redraw()
+        self.layout_update_position_fields()
+
+    def layout_align(self, direction):
+        if len(self.layout_selected_ids) < 2:
+            return
+        selected = list(self.layout_selected_ids)
+        ref = self.layout_items[selected[0]]
+        ref_x = ref["x"]
+        ref_y = ref["y"]
+        for item_id in self.layout_selected_ids:
+            item = self.layout_items[item_id]
+            if direction == "horizontal":
+                item["y"] = ref_y
+            else:
+                item["x"] = ref_x
+            canvas_x, canvas_y = self.layout_to_canvas(item["x"], item["y"])
+            self.layout_canvas.coords(item_id, canvas_x, canvas_y)
+            if item.get("rect_id"):
+                width = item["width"] * self.layout_zoom
+                height = item["height"] * self.layout_zoom
+                self.layout_canvas.coords(item["rect_id"], canvas_x, canvas_y, canvas_x + width, canvas_y + height)
+        if self.layout_snap_var.get() and self.layout_mode_var.get() == "Grid":
+            self.layout_snap_selected()
+        self.layout_redraw()
+        self.layout_update_position_fields()
+
+    def layout_center_in_cell(self):
+        if not self.layout_selected_ids:
+            return
+        if self.layout_mode_var.get() != "Grid":
+            messagebox.showinfo("Center in cell", "Centering requires Grid mode.")
+            return
+        cell_w, cell_h, pad = self.layout_get_cell_and_padding()
+        step_x = cell_w + pad
+        step_y = cell_h + pad
+        if step_x <= 0 or step_y <= 0:
+            return
+        for item_id in self.layout_selected_ids:
+            item = self.layout_items[item_id]
+            col = int(round(item["x"] / step_x))
+            row = int(round(item["y"] / step_y))
+            new_x = col * step_x + (cell_w - item["width"]) / 2
+            new_y = row * step_y + (cell_h - item["height"]) / 2
+            item["x"] = new_x
+            item["y"] = new_y
+            canvas_x, canvas_y = self.layout_to_canvas(new_x, new_y)
+            self.layout_canvas.coords(item_id, canvas_x, canvas_y)
+            if item.get("rect_id"):
+                width = item["width"] * self.layout_zoom
+                height = item["height"] * self.layout_zoom
+                self.layout_canvas.coords(item["rect_id"], canvas_x, canvas_y, canvas_x + width, canvas_y + height)
+        self.layout_redraw()
+        self.layout_update_position_fields()
+
+    def layout_get_cell_and_padding(self, extra_sizes=None):
+        extra_sizes = extra_sizes or []
+        widths = [item["width"] for item in self.layout_items.values()] + [w for w, _ in extra_sizes]
+        heights = [item["height"] for item in self.layout_items.values()] + [h for _, h in extra_sizes]
+
+        if self.layout_type_var.get() == "Tilemap":
+            if self.tile_size_mode_var.get() == "Force":
+                cell_w = cell_h = int(self.tile_size_var.get())
+            else:
+                cell_w = max(widths) if widths else int(self.tile_size_var.get())
+                cell_h = max(heights) if heights else int(self.tile_size_var.get())
+            pad = 0
+        else:
+            cell_w = max(widths) if widths else 32
+            cell_h = max(heights) if heights else 32
+            if self.sprite_padding_mode_var.get() == "Frame width":
+                pad = cell_w
+            elif self.sprite_padding_mode_var.get() == "Frame height":
+                pad = cell_h
+            else:
+                pad = int(self.sprite_padding_var.get())
+        return cell_w, cell_h, pad
+
+    def layout_to_canvas(self, x, y):
+        return x * self.layout_zoom, y * self.layout_zoom
+
+    def layout_from_canvas(self, x, y):
+        return x / self.layout_zoom, y / self.layout_zoom
+
+    def layout_make_photo(self, pil_image):
+        if self.layout_zoom == 1.0:
+            resized = pil_image
+        else:
+            width = max(1, int(round(pil_image.width * self.layout_zoom)))
+            height = max(1, int(round(pil_image.height * self.layout_zoom)))
+            resample = Image.NEAREST
+            if hasattr(Image, "Resampling"):
+                resample = Image.Resampling.NEAREST
+            resized = pil_image.resize((width, height), resample)
+        return ImageTk.PhotoImage(resized)
+
+    def layout_set_zoom(self, zoom):
+        zoom = max(0.2, min(zoom, 4.0))
+        if abs(zoom - self.layout_zoom) < 0.001:
+            return
+        self.layout_zoom = zoom
+        for item_id, item in self.layout_items.items():
+            item["image"] = self.layout_make_photo(item["pil"])
+            self.layout_canvas.itemconfigure(item_id, image=item["image"])
+        self.layout_redraw()
+
+    def layout_on_mousewheel(self, event):
+        delta = event.delta
+        if delta == 0:
+            return
+        factor = 1.1 if delta > 0 else 0.9
+        self.layout_set_zoom(self.layout_zoom * factor)
+
+    def setup_layout_dnd(self):
+        if TkinterDnD is None or DND_FILES is None:
+            self.layout_dnd_ready = False
+            return
+        try:
+            self.layout_canvas.drop_target_register(DND_FILES)
+            self.layout_canvas.dnd_bind("<<Drop>>", self.layout_on_dnd_drop)
+            self.layout_dnd_ready = True
+        except Exception:
+            self.layout_dnd_ready = False
+
+    def layout_parse_dnd_files(self, data):
+        if not data:
+            return []
+        try:
+            return list(self.root.tk.splitlist(data))
+        except Exception:
+            return data.split()
+
+    def layout_on_dnd_drop(self, event):
+        files = self.layout_parse_dnd_files(getattr(event, "data", ""))
+        json_files = [path for path in files if path.lower().endswith(".json")]
+        if not json_files:
+            return "break"
+        self.layout_load_file(json_files[0])
+        return "break"
+
+    def layout_next_position(self, index, cell_w, cell_h, pad):
+        if self.layout_mode_var.get() == "Grid":
+            cols = max(1, int(self.layout_grid_columns_var.get()))
+            row = index // cols
+            col = index % cols
+            x = col * (cell_w + pad)
+            y = row * (cell_h + pad)
+            return x, y
+        offset = 10
+        return index * offset, index * offset
+
+    def layout_add_selected(self):
+        folder_path = self.layout_get_folder_path()
+        if not folder_path or not os.path.isdir(folder_path):
+            messagebox.showerror("Invalid folder", "Select a valid source folder first.")
+            return
+        selections = self.layout_listbox.curselection()
+        if not selections:
+            return
+        existing = {item["file"] for item in self.layout_items.values()}
+        new_items = []
+        for idx in selections:
+            file = self.layout_listbox.get(idx)
+            if file in existing:
+                continue
+            path = os.path.join(folder_path, file)
+            try:
+                with Image.open(path) as img:
+                    pil = img.convert("RGBA")
+            except Exception:
+                continue
+            photo = self.layout_make_photo(pil)
+            new_items.append((file, path, pil, photo, pil.width, pil.height))
+
+        if not new_items:
+            return
+        extra_sizes = [(item[4], item[5]) for item in new_items]
+        cell_w, cell_h, pad = self.layout_get_cell_and_padding(extra_sizes=extra_sizes)
+        start_index = len(self.layout_items)
+        for i, (file, path, pil, photo, width, height) in enumerate(new_items):
+            x, y = self.layout_next_position(start_index + i, cell_w, cell_h, pad)
+            canvas_x, canvas_y = self.layout_to_canvas(x, y)
+            item_id = self.layout_canvas.create_image(canvas_x, canvas_y, anchor="nw", image=photo, tags=("layout_item",))
+            self.layout_items[item_id] = {
+                "file": file,
+                "path": path,
+                "image": photo,
+                "pil": pil,
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+                "rect_id": None,
+            }
+        self.layout_redraw()
+        self.layout_maybe_set_output_name()
+
+    def layout_remove_selected(self):
+        for item_id in list(self.layout_selected_ids):
+            item = self.layout_items.pop(item_id, None)
+            if not item:
+                continue
+            if item.get("rect_id"):
+                self.layout_canvas.delete(item["rect_id"])
+            self.layout_canvas.delete(item_id)
+        self.layout_selected_ids.clear()
+        self.layout_redraw()
+        self.layout_update_position_fields()
+
+    def layout_copy_selected(self):
+        if not self.layout_selected_ids:
+            return
+        cell_w, cell_h, pad = self.layout_get_cell_and_padding()
+        step_x = cell_w + pad
+        step_y = cell_h + pad
+        use_grid = self.layout_mode_var.get() == "Grid"
+        cols = max(1, int(self.layout_grid_columns_var.get())) if use_grid else 1
+        occupied = set()
+        if use_grid and step_x > 0 and step_y > 0:
+            for existing in self.layout_items.values():
+                col = int(round(existing["x"] / step_x))
+                row = int(round(existing["y"] / step_y))
+                occupied.add((row, col))
+        new_ids = []
+        for item_id in list(self.layout_selected_ids):
+            item = self.layout_items.get(item_id)
+            if not item:
+                continue
+            pil = item["pil"]
+            photo = self.layout_make_photo(pil)
+            new_x = item["x"]
+            new_y = item["y"]
+            if use_grid and step_x > 0 and step_y > 0:
+                base_col = int(round(item["x"] / step_x))
+                base_row = int(round(item["y"] / step_y))
+                index = base_row * cols + base_col + 1
+                while True:
+                    col = index % cols
+                    row = index // cols
+                    if (row, col) not in occupied:
+                        break
+                    index += 1
+                occupied.add((row, col))
+                new_x = col * step_x
+                new_y = row * step_y
+            else:
+                new_x += 10
+                new_y += 10
+            canvas_x, canvas_y = self.layout_to_canvas(new_x, new_y)
+            new_id = self.layout_canvas.create_image(
+                canvas_x,
+                canvas_y,
+                anchor="nw",
+                image=photo,
+                tags=("layout_item",),
+            )
+            self.layout_items[new_id] = {
+                "file": item["file"],
+                "path": item["path"],
+                "image": photo,
+                "pil": pil,
+                "x": new_x,
+                "y": new_y,
+                "width": item["width"],
+                "height": item["height"],
+                "rect_id": None,
+            }
+            new_ids.append(new_id)
+        for new_id in new_ids:
+            self.layout_selected_ids.add(new_id)
+            self.layout_update_selection_rect(new_id)
+        self.layout_redraw()
+        self.layout_update_position_fields()
+
+    def layout_clear_canvas(self):
+        for item_id, item in list(self.layout_items.items()):
+            if item.get("rect_id"):
+                self.layout_canvas.delete(item["rect_id"])
+            self.layout_canvas.delete(item_id)
+        self.layout_items.clear()
+        self.layout_selected_ids.clear()
+        self.layout_redraw()
+        self.layout_update_position_fields()
+
+    def layout_find_item_at(self, x, y):
+        items = self.layout_canvas.find_overlapping(x, y, x, y)
+        for item_id in reversed(items):
+            if item_id in self.layout_items:
+                return item_id
+        return None
+
+    def layout_update_selection_rect(self, item_id):
+        item = self.layout_items.get(item_id)
+        if not item:
+            return
+        x, y = self.layout_to_canvas(item["x"], item["y"])
+        width = item["width"] * self.layout_zoom
+        height = item["height"] * self.layout_zoom
+        rect = item.get("rect_id")
+        if rect is None:
+            rect = self.layout_canvas.create_rectangle(
+                x,
+                y,
+                x + width,
+                y + height,
+                outline="#3d7bfd",
+                width=2,
+                tags=("selection",),
+            )
+            item["rect_id"] = rect
+        else:
+            self.layout_canvas.coords(rect, x, y, x + width, y + height)
+        self.layout_canvas.tag_raise(rect)
+
+    def layout_clear_selection_rect(self, item_id):
+        item = self.layout_items.get(item_id)
+        if item and item.get("rect_id"):
+            self.layout_canvas.delete(item["rect_id"])
+            item["rect_id"] = None
+
+    def layout_select_item(self, item_id, add=False, toggle=False):
+        if toggle and item_id in self.layout_selected_ids:
+            self.layout_selected_ids.remove(item_id)
+            self.layout_clear_selection_rect(item_id)
+            self.layout_update_position_fields()
+            return
+        if not add and not toggle:
+            for selected in list(self.layout_selected_ids):
+                self.layout_clear_selection_rect(selected)
+            self.layout_selected_ids.clear()
+        self.layout_selected_ids.add(item_id)
+        self.layout_update_selection_rect(item_id)
+        self.layout_update_position_fields()
+
+    def layout_on_press(self, event):
+        canvas_x = self.layout_canvas.canvasx(event.x)
+        canvas_y = self.layout_canvas.canvasy(event.y)
+        item_id = self.layout_find_item_at(canvas_x, canvas_y)
+        if not item_id:
+            for selected in list(self.layout_selected_ids):
+                self.layout_clear_selection_rect(selected)
+            self.layout_selected_ids.clear()
+            self.layout_update_position_fields()
+            self.layout_drag_start = None
+            return
+        add = bool(event.state & 0x0001)
+        toggle = bool(event.state & 0x0004)
+        self.layout_select_item(item_id, add=add, toggle=toggle)
+        x, y = self.layout_from_canvas(canvas_x, canvas_y)
+        self.layout_drag_start = (x, y)
+        self.layout_drag_positions = {
+            selected: (self.layout_items[selected]["x"], self.layout_items[selected]["y"])
+            for selected in self.layout_selected_ids
+        }
+
+    def layout_on_drag(self, event):
+        if not self.layout_drag_start:
+            return
+        canvas_x = self.layout_canvas.canvasx(event.x)
+        canvas_y = self.layout_canvas.canvasy(event.y)
+        x, y = self.layout_from_canvas(canvas_x, canvas_y)
+        dx = x - self.layout_drag_start[0]
+        dy = y - self.layout_drag_start[1]
+        cell_w, cell_h, pad = self.layout_get_cell_and_padding()
+        step_x = cell_w + pad
+        step_y = cell_h + pad
+        snap = self.layout_snap_var.get() and self.layout_mode_var.get() == "Grid"
+
+        for item_id in self.layout_selected_ids:
+            start_x, start_y = self.layout_drag_positions.get(item_id, (0, 0))
+            new_x = start_x + dx
+            new_y = start_y + dy
+            if snap and step_x > 0 and step_y > 0:
+                col = int(round(new_x / step_x))
+                row = int(round(new_y / step_y))
+                new_x = col * step_x
+                new_y = row * step_y
+            item = self.layout_items[item_id]
+            item["x"] = new_x
+            item["y"] = new_y
+            canvas_x, canvas_y = self.layout_to_canvas(new_x, new_y)
+            self.layout_canvas.coords(item_id, canvas_x, canvas_y)
+            if item.get("rect_id"):
+                width = item["width"] * self.layout_zoom
+                height = item["height"] * self.layout_zoom
+                self.layout_canvas.coords(item["rect_id"], canvas_x, canvas_y, canvas_x + width, canvas_y + height)
+
+        self.layout_redraw()
+        self.layout_update_position_fields()
+
+    def layout_on_release(self, _event):
+        self.layout_drag_start = None
+        self.layout_drag_positions = {}
+        self.layout_update_position_fields()
+
+    def layout_snap_selected(self):
+        if not self.layout_snap_var.get() or self.layout_mode_var.get() != "Grid":
+            return
+        cell_w, cell_h, pad = self.layout_get_cell_and_padding()
+        step_x = cell_w + pad
+        step_y = cell_h + pad
+        if step_x <= 0 or step_y <= 0:
+            return
+        for item_id, item in self.layout_items.items():
+            col = int(round(item["x"] / step_x))
+            row = int(round(item["y"] / step_y))
+            new_x = col * step_x
+            new_y = row * step_y
+            item["x"] = new_x
+            item["y"] = new_y
+            canvas_x, canvas_y = self.layout_to_canvas(new_x, new_y)
+            self.layout_canvas.coords(item_id, canvas_x, canvas_y)
+            if item.get("rect_id"):
+                width = item["width"] * self.layout_zoom
+                height = item["height"] * self.layout_zoom
+                self.layout_canvas.coords(item["rect_id"], canvas_x, canvas_y, canvas_x + width, canvas_y + height)
+        self.layout_redraw()
+        self.layout_update_position_fields()
+
+    def layout_redraw(self):
+        self.update_layout_mode_controls()
+        self.update_layout_tile_size_controls()
+        cell_w, cell_h, pad = self.layout_get_cell_and_padding()
+        cols = max(1, int(self.layout_grid_columns_var.get()))
+        rows = int(self.layout_grid_rows_var.get())
+        max_x = max((item["x"] + item["width"]) for item in self.layout_items.values()) if self.layout_items else 0
+        max_y = max((item["y"] + item["height"]) for item in self.layout_items.values()) if self.layout_items else 0
+
+        if self.layout_mode_var.get() == "Grid":
+            step_x = cell_w + pad
+            step_y = cell_h + pad
+            if rows <= 0 and step_x > 0 and step_y > 0 and self.layout_items:
+                row_indices = [int(item["y"] // step_y) for item in self.layout_items.values()]
+                rows = max(row_indices) + 1 if row_indices else 1
+            if rows <= 0:
+                rows = 1
+            grid_w = (cols * cell_w) + (pad * max(0, cols - 1))
+            grid_h = (rows * cell_h) + (pad * max(0, rows - 1))
+        else:
+            grid_w = 0
+            grid_h = 0
+
+        canvas_w = max(grid_w, max_x, 1) * self.layout_zoom
+        canvas_h = max(grid_h, max_y, 1) * self.layout_zoom
+        self.layout_canvas.configure(scrollregion=(0, 0, canvas_w, canvas_h))
+
+        self.layout_canvas.delete("grid_line")
+        self.layout_canvas.delete("guide_line")
+
+        if self.layout_show_grid_var.get() and self.layout_mode_var.get() == "Grid":
+            step_x = cell_w + pad
+            step_y = cell_h + pad
+            for col in range(cols):
+                x0 = col * step_x
+                x1 = x0 + cell_w
+                x0s = x0 * self.layout_zoom
+                x1s = x1 * self.layout_zoom
+                self.layout_canvas.create_line(x0s, 0, x0s, grid_h * self.layout_zoom, fill="#808080", tags=("grid_line",))
+                self.layout_canvas.create_line(x1s, 0, x1s, grid_h * self.layout_zoom, fill="#808080", tags=("grid_line",))
+            for row in range(rows):
+                y0 = row * step_y
+                y1 = y0 + cell_h
+                y0s = y0 * self.layout_zoom
+                y1s = y1 * self.layout_zoom
+                self.layout_canvas.create_line(0, y0s, grid_w * self.layout_zoom, y0s, fill="#808080", tags=("grid_line",))
+                self.layout_canvas.create_line(0, y1s, grid_w * self.layout_zoom, y1s, fill="#808080", tags=("grid_line",))
+            self.layout_canvas.tag_lower("grid_line")
+
+        if self.layout_show_guides_var.get():
+            cx = canvas_w // 2
+            cy = canvas_h // 2
+            self.layout_canvas.create_line(cx, 0, cx, canvas_h, fill="#a0a0a0", dash=(4, 2), tags=("guide_line",))
+            self.layout_canvas.create_line(0, cy, canvas_w, cy, fill="#a0a0a0", dash=(4, 2), tags=("guide_line",))
+            self.layout_canvas.tag_lower("guide_line")
+
+        for item_id, item in self.layout_items.items():
+            canvas_x, canvas_y = self.layout_to_canvas(item["x"], item["y"])
+            self.layout_canvas.coords(item_id, canvas_x, canvas_y)
+            if item.get("rect_id"):
+                width = item["width"] * self.layout_zoom
+                height = item["height"] * self.layout_zoom
+                self.layout_canvas.coords(item["rect_id"], canvas_x, canvas_y, canvas_x + width, canvas_y + height)
+
+        for item_id in self.layout_selected_ids:
+            self.layout_update_selection_rect(item_id)
+
+    def layout_export(self):
+        if self.running or self.previewing or self.sheet_running or self.tile_running:
+            messagebox.showerror("Busy", "A batch run is already in progress.")
+            return
+        folder_path = self.layout_get_folder_path()
+        if not folder_path or not os.path.isdir(folder_path):
+            messagebox.showerror("Invalid folder", "Select a valid source folder first.")
+            return
+        if not self.layout_items:
+            messagebox.showerror("No frames", "Add frames to the canvas first.")
+            return
+        output_name = self.layout_output_var.get().strip()
+        if not output_name:
+            missing_kind = "spritesheet" if self.layout_type_var.get() == "Spritesheet" else "tilemap"
+            messagebox.showerror("Missing name", f"Provide a {missing_kind} name first.")
+            return
+        if output_name.lower().endswith(".png"):
+            output_name = output_name[:-4]
+        elif output_name.lower().endswith(".json"):
+            output_name = output_name[:-5]
+
+        cell_w, cell_h, pad = self.layout_get_cell_and_padding()
+        cols = max(1, int(self.layout_grid_columns_var.get()))
+        rows = int(self.layout_grid_rows_var.get())
+        max_x = max((item["x"] + item["width"]) for item in self.layout_items.values())
+        max_y = max((item["y"] + item["height"]) for item in self.layout_items.values())
+
+        if self.layout_mode_var.get() == "Grid":
+            step_x = cell_w + pad
+            step_y = cell_h + pad
+            if rows <= 0 and step_x > 0 and step_y > 0:
+                row_indices = [int(item["y"] // step_y) for item in self.layout_items.values()]
+                rows = max(row_indices) + 1 if row_indices else 1
+            if rows <= 0:
+                rows = 1
+            grid_w = (cols * cell_w) + (pad * max(0, cols - 1))
+            grid_h = (rows * cell_h) + (pad * max(0, rows - 1))
+        else:
+            grid_w = 0
+            grid_h = 0
+
+        out_w = max(grid_w, max_x)
+        out_h = max(grid_h, max_y)
+
+        if self.layout_type_var.get() == "Spritesheet":
+            out_dir = os.path.join(folder_path, "sprite_sheets")
+            out_name = f"{output_name}.png"
+        else:
+            out_dir = os.path.join(folder_path, "tilemaps")
+            out_name = f"{output_name}.png"
+
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, out_name)
+        canvas = Image.new("RGBA", (out_w, out_h), (0, 0, 0, 0))
+        metadata = []
+        for item in self.layout_items.values():
+            try:
+                with Image.open(item["path"]) as img:
+                    img = img.convert("RGBA")
+                    canvas.paste(img, (int(item["x"]), int(item["y"])))
+                    metadata.append((item["file"], int(item["x"]), int(item["y"]), img.width, img.height))
+            except Exception:
+                continue
+        canvas.save(out_path, format="PNG")
+
+        if self.layout_type_var.get() == "Tilemap" and self.tile_export_meta_var.get():
+            meta_path = os.path.join(out_dir, f"{output_name}.csv")
+            with open(meta_path, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["tilemap", "tile", "x", "y", "width", "height"])
+                for file, x, y, w, h in metadata:
+                    writer.writerow([out_name, file, x, y, w, h])
+
+        self.layout_save()
+        self.layout_status_label.configure(text="Exported")
+        messagebox.showinfo("Exported", f"Saved to:\n{out_path}")
+
+    def layout_build_json(self):
+        return {
+            "type": self.layout_type_var.get(),
+            "input_root": self.input_var.get(),
+            "source_folder": self.layout_folder_var.get(),
+            "output_name": self.layout_output_var.get(),
+            "layout_mode": self.layout_mode_var.get(),
+            "columns": self.layout_grid_columns_var.get(),
+            "rows": self.layout_grid_rows_var.get(),
+            "snap": self.layout_snap_var.get(),
+            "show_grid": self.layout_show_grid_var.get(),
+            "show_guides": self.layout_show_guides_var.get(),
+            "sprite_padding_mode": self.sprite_padding_mode_var.get(),
+            "sprite_padding": self.sprite_padding_var.get(),
+            "tile_size_mode": self.tile_size_mode_var.get(),
+            "tile_size": self.tile_size_var.get(),
+            "tile_export_meta": self.tile_export_meta_var.get(),
+            "items": [
+                {
+                    "file": item["file"],
+                    "x": int(item["x"]),
+                    "y": int(item["y"]),
+                    "width": int(item["width"]),
+                    "height": int(item["height"]),
+                }
+                for item in self.layout_items.values()
+            ],
+        }
+
+    def layout_save(self):
+        folder_path = self.layout_get_folder_path()
+        if not folder_path:
+            return
+        output_name = self.layout_output_var.get().strip()
+        if not output_name:
+            return
+        if output_name.lower().endswith(".png"):
+            output_name = output_name[:-4]
+        elif output_name.lower().endswith(".json"):
+            output_name = output_name[:-5]
+        if self.layout_type_var.get() == "Spritesheet":
+            out_dir = os.path.join(folder_path, "sprite_sheets")
+            layout_name = f"{output_name}.json"
+        else:
+            out_dir = os.path.join(folder_path, "tilemaps")
+            layout_name = f"{output_name}.json"
+        os.makedirs(out_dir, exist_ok=True)
+        layout_path = os.path.join(out_dir, layout_name)
+        with open(layout_path, "w", encoding="utf-8") as handle:
+            json.dump(self.layout_build_json(), handle, indent=2)
+        self.layout_refresh_recent_jsons()
+
+    def layout_load_file(self, path):
+        if not path or not os.path.isfile(path):
+            messagebox.showerror("Layout error", "Select a valid JSON file.")
+            return
+        if not path.lower().endswith(".json"):
+            messagebox.showerror("Layout error", "Only JSON layout files can be loaded.")
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception as exc:
+            messagebox.showerror("Layout error", f"Failed to load layout:\n{exc}")
+            return
+
+        input_root = data.get("input_root")
+        if input_root and os.path.isdir(input_root):
+            self.input_var.set(input_root)
+        self.layout_type_var.set(data.get("type", "Spritesheet"))
+        self.layout_folder_var.set(data.get("source_folder", ""))
+        self.layout_output_var.set(data.get("output_name", ""))
+        self.layout_mode_var.set(data.get("layout_mode", "Grid"))
+        self.layout_grid_columns_var.set(int(data.get("columns", 4)))
+        self.layout_grid_rows_var.set(int(data.get("rows", 0)))
+        self.layout_snap_var.set(bool(data.get("snap", True)))
+        self.layout_show_grid_var.set(bool(data.get("show_grid", True)))
+        self.layout_show_guides_var.set(bool(data.get("show_guides", False)))
+        self.sprite_padding_mode_var.set(data.get("sprite_padding_mode", "Fixed"))
+        self.sprite_padding_var.set(int(data.get("sprite_padding", 1)))
+        self.tile_size_mode_var.set(data.get("tile_size_mode", "Force"))
+        self.tile_size_var.set(int(data.get("tile_size", 32)))
+        self.tile_export_meta_var.set(bool(data.get("tile_export_meta", True)))
+        self.update_layout_type_controls()
+        self.refresh_layout_folders()
+
+        self.layout_clear_canvas()
+        folder_path = self.layout_get_folder_path()
+        if not folder_path:
+            return
+        for item in data.get("items", []):
+            file = item.get("file")
+            if not file:
+                continue
+            item_path = os.path.join(folder_path, file)
+            if not os.path.exists(item_path):
+                continue
+            try:
+                with Image.open(item_path) as img:
+                    pil = img.convert("RGBA")
+            except Exception:
+                continue
+            photo = self.layout_make_photo(pil)
+            width = pil.width
+            height = pil.height
+            x = int(item.get("x", 0))
+            y = int(item.get("y", 0))
+            canvas_x, canvas_y = self.layout_to_canvas(x, y)
+            item_id = self.layout_canvas.create_image(canvas_x, canvas_y, anchor="nw", image=photo, tags=("layout_item",))
+            self.layout_items[item_id] = {
+                "file": file,
+                "path": item_path,
+                "image": photo,
+                "pil": pil,
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+                "rect_id": None,
+            }
+        self.layout_redraw()
+        self.layout_refresh_recent_jsons()
+        if hasattr(self, "layout_recent_combo"):
+            input_root = self.input_var.get().strip()
+            try:
+                label = os.path.relpath(path, input_root)
+            except ValueError:
+                label = os.path.basename(path)
+            if label in self.layout_recent_combo["values"]:
+                self.layout_recent_json_var.set(label)
+
+    def layout_load(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("JSON files", "*.json")],
+            initialdir=APP_DIR,
+        )
+        if not path:
+            return
+        self.layout_load_file(path)
+
+    def layout_load_recent_json(self):
+        if not getattr(self, "layout_recent_combo", None):
+            return
+        selected = self.layout_recent_json_var.get().strip()
+        path = None
+        if selected and selected in self.layout_recent_combo["values"]:
+            index = list(self.layout_recent_combo["values"]).index(selected)
+            if 0 <= index < len(self.layout_recent_json_paths):
+                path = self.layout_recent_json_paths[index]
+        if not path and self.layout_recent_json_paths:
+            path = self.layout_recent_json_paths[0]
+        if path:
+            self.layout_load_file(path)
+
     def bind_color_swatch_updates(self):
         for var in (self.color_list_var, self.fill_color_var, self.replace_from_var, self.replace_to_var):
             var.trace_add("write", lambda *_: self.update_swatches())
@@ -575,7 +1932,7 @@ class App:
         self.update_swatch(self.replace_from_swatch, self.replace_from_var.get())
         self.update_swatch(self.replace_to_swatch, self.replace_to_var.get())
 
-    def setup_tooltips(self, transparent_radio, fill_radio, replace_radio, process_all_btn, skip_existing_btn, skip_files_btn, dry_run_btn, tooltips_btn):
+    def setup_tooltips(self, transparent_radio, fill_radio, replace_radio, process_all_btn, skip_existing_btn, skip_files_btn, dry_run_btn, tooltips_btn, preview_btn, scan_prefixes_btn, keep_prefixes_check):
         Tooltip(transparent_radio, lambda: "Turn matching colors fully transparent.", self.tooltips_enabled_var)
         Tooltip(fill_radio, lambda: "Fill transparent pixels with a solid color.", self.tooltips_enabled_var)
         Tooltip(replace_radio, lambda: "Swap one exact color for another.", self.tooltips_enabled_var)
@@ -585,17 +1942,110 @@ class App:
         Tooltip(self.fill_shadows_check, lambda: "Experimental: fills semi-transparent pixels with a solid color.", self.tooltips_enabled_var)
         Tooltip(self.replace_from_entry, lambda: "Exact source color to replace.", self.tooltips_enabled_var)
         Tooltip(self.replace_to_entry, lambda: "Exact destination color.", self.tooltips_enabled_var)
-        Tooltip(self.extra_prefix_entry, lambda: "Extra prefixes to strip (comma-separated).", self.tooltips_enabled_var)
-        Tooltip(skip_existing_btn, lambda: "Skip top-level folders already in the output.", self.tooltips_enabled_var)
+        Tooltip(self.extra_prefix_entry, lambda: "Extra prefixes to detect (comma-separated).", self.tooltips_enabled_var)
+        Tooltip(skip_existing_btn, lambda: "Skip prefix-named folders already in the output.", self.tooltips_enabled_var)
         Tooltip(skip_files_btn, lambda: "Skip files that already exist in the output.", self.tooltips_enabled_var)
         Tooltip(dry_run_btn, lambda: "Scan and log only. No files are written.", self.tooltips_enabled_var)
         Tooltip(tooltips_btn, lambda: "Toggle tooltip hints on or off.", self.tooltips_enabled_var)
+        Tooltip(preview_btn, lambda: "Preview how files will be grouped by prefix.", self.tooltips_enabled_var)
+        Tooltip(scan_prefixes_btn, lambda: "Scan input folders and list detected prefixes.", self.tooltips_enabled_var)
+        Tooltip(keep_prefixes_check, lambda: "Keep full filenames instead of stripping prefixes.", self.tooltips_enabled_var)
+
+    def get_selected_prefixes(self):
+        prefixes = [name for name, var in self.prefix_vars.items() if var.get()]
+        extra = [p.strip() for p in self.extra_prefix_var.get().split(",") if p.strip()]
+        prefixes.extend(extra)
+        return prefixes
+
+    def render_prefix_checkboxes(self):
+        for child in self.prefix_list_frame.winfo_children():
+            child.destroy()
+        if not self.prefix_vars:
+            ttk.Label(self.prefix_list_frame, text="No prefixes detected. Click Scan for prefixes.").grid(row=0, column=0, sticky="w")
+            return
+        col_count = 4
+        for idx, name in enumerate(sorted(self.prefix_vars, key=str.lower)):
+            row = idx // col_count
+            col = idx % col_count
+            ttk.Checkbutton(self.prefix_list_frame, text=name, variable=self.prefix_vars[name]).grid(row=row, column=col, padx=4, sticky="w")
+
+    def set_prefixes(self, prefix_states):
+        self.prefix_vars = {}
+        for name in sorted(prefix_states, key=str.lower):
+            self.prefix_vars[name] = tk.BooleanVar(value=bool(prefix_states[name]))
+        self.render_prefix_checkboxes()
+
+    def scan_prefixes(self):
+        input_root = self.input_var.get().strip()
+        if not os.path.isdir(input_root):
+            messagebox.showerror("Invalid input", "Input folder does not exist.")
+            return
+
+        rules = self.get_folder_rules()
+        if self.process_all_var.get():
+            allowed_dirs = None
+        else:
+            allowed_dirs = {name for name, rule in rules.items() if rule.get("include")}
+        exclude_folders = {name.strip() for name in self.exclude_folders_var.get().split(",") if name.strip()}
+
+        prefix_re = re.compile(r"^(?P<prefix>[^_]+)_\d+_")
+        found = set()
+        top_dirs = [d for d in os.listdir(input_root) if os.path.isdir(os.path.join(input_root, d))]
+        top_dirs.sort(key=lambda s: s.lower())
+        for top in top_dirs:
+            if allowed_dirs is not None and top not in allowed_dirs:
+                continue
+            if top in exclude_folders:
+                continue
+            for root, _, files in os.walk(os.path.join(input_root, top)):
+                for file in files:
+                    if not file.lower().endswith(".png"):
+                        continue
+                    base = os.path.splitext(file)[0]
+                    match = prefix_re.match(base)
+                    if match:
+                        found.add(match.group("prefix"))
+
+        if not found:
+            self.prefix_vars = {}
+            self.render_prefix_checkboxes()
+            messagebox.showinfo("Scan complete", "No prefixes were detected.")
+            return
+
+        existing_states = {name: var.get() for name, var in self.prefix_vars.items()}
+        prefix_states = {name: existing_states.get(name, True) for name in found}
+        self.set_prefixes(prefix_states)
+        messagebox.showinfo("Scan complete", f"Detected {len(prefix_states)} prefixes.")
+
+    def detect_conflicts(self, tasks):
+        path_map = {}
+        for task in tasks:
+            if task["action"] == "skip_existing_file":
+                continue
+            path_map.setdefault(task["out_path"], []).append(task)
+        return {path: items for path, items in path_map.items() if len(items) > 1}
+
+    def apply_copy_suffixes(self, tasks, conflicts, output_root):
+        used_paths = {task["out_path"] for task in tasks}
+        for path, group in conflicts.items():
+            base_root, ext = os.path.splitext(path)
+            for task in group[1:]:
+                copy_index = 1
+                while True:
+                    candidate = f"{base_root}_copy{copy_index}{ext}"
+                    if candidate not in used_paths and not os.path.exists(candidate):
+                        break
+                    copy_index += 1
+                used_paths.add(candidate)
+                task["out_path"] = candidate
+                task["rel_out"] = os.path.relpath(candidate, output_root)
 
     def pick_input(self):
         path = filedialog.askdirectory(initialdir=self.input_var.get() or os.getcwd())
         if path:
             self.input_var.set(path)
             self.refresh_folders()
+            self.refresh_layout_folders()
 
     def pick_output(self):
         path = filedialog.askdirectory(initialdir=self.output_var.get() or os.getcwd())
@@ -684,6 +2134,7 @@ class App:
             "replace_from": self.replace_from_var.get(),
             "replace_to": self.replace_to_var.get(),
             "extra_prefixes": self.extra_prefix_var.get(),
+            "keep_prefixes": self.keep_prefixes_var.get(),
             "prefixes": {name: var.get() for name, var in self.prefix_vars.items()},
             "process_all": self.process_all_var.get(),
             "skip_existing_folders": self.skip_existing_var.get(),
@@ -692,6 +2143,24 @@ class App:
             "csv_log": self.csv_log_var.get(),
             "csv_path": self.csv_path_var.get(),
             "exclude_folders": self.exclude_folders_var.get(),
+            "sprite_layout": self.sprite_layout_var.get(),
+            "sprite_columns": self.sprite_columns_var.get(),
+            "sprite_padding_mode": self.sprite_padding_mode_var.get(),
+            "sprite_padding": self.sprite_padding_var.get(),
+            "tile_layout": self.tile_layout_var.get(),
+            "tile_columns": self.tile_columns_var.get(),
+            "tile_size": self.tile_size_var.get(),
+            "tile_export_meta": self.tile_export_meta_var.get(),
+            "layout_type": self.layout_type_var.get(),
+            "layout_folder": self.layout_folder_var.get(),
+            "layout_output_name": self.layout_output_var.get(),
+            "layout_mode": self.layout_mode_var.get(),
+            "layout_columns": self.layout_grid_columns_var.get(),
+            "layout_rows": self.layout_grid_rows_var.get(),
+            "layout_snap": self.layout_snap_var.get(),
+            "layout_show_grid": self.layout_show_grid_var.get(),
+            "layout_show_guides": self.layout_show_guides_var.get(),
+            "tile_size_mode": self.tile_size_mode_var.get(),
             "recent_presets": self.recent_presets,
             "tooltips_enabled": self.tooltips_enabled_var.get(),
             "theme": self.theme_var.get(),
@@ -709,6 +2178,7 @@ class App:
         self.replace_from_var.set(data.get("replace_from", ""))
         self.replace_to_var.set(data.get("replace_to", ""))
         self.extra_prefix_var.set(data.get("extra_prefixes", ""))
+        self.keep_prefixes_var.set(bool(data.get("keep_prefixes", False)))
         self.process_all_var.set(bool(data.get("process_all", True)))
         self.skip_existing_var.set(bool(data.get("skip_existing_folders", True)))
         self.skip_existing_files_var.set(bool(data.get("skip_existing_files", False)))
@@ -716,6 +2186,24 @@ class App:
         self.csv_log_var.set(bool(data.get("csv_log", False)))
         self.csv_path_var.set(data.get("csv_path", ""))
         self.exclude_folders_var.set(data.get("exclude_folders", ""))
+        self.sprite_layout_var.set(data.get("sprite_layout", "Grid"))
+        self.sprite_columns_var.set(int(data.get("sprite_columns", 4)))
+        self.sprite_padding_mode_var.set(data.get("sprite_padding_mode", "Fixed"))
+        self.sprite_padding_var.set(int(data.get("sprite_padding", 1)))
+        self.tile_layout_var.set(data.get("tile_layout", "Grid"))
+        self.tile_columns_var.set(int(data.get("tile_columns", 15)))
+        self.tile_size_var.set(int(data.get("tile_size", 32)))
+        self.tile_export_meta_var.set(bool(data.get("tile_export_meta", True)))
+        self.layout_type_var.set(data.get("layout_type", "Spritesheet"))
+        self.layout_folder_var.set(data.get("layout_folder", ""))
+        self.layout_output_var.set(data.get("layout_output_name", ""))
+        self.layout_mode_var.set(data.get("layout_mode", "Grid"))
+        self.layout_grid_columns_var.set(int(data.get("layout_columns", 4)))
+        self.layout_grid_rows_var.set(int(data.get("layout_rows", 0)))
+        self.layout_snap_var.set(bool(data.get("layout_snap", True)))
+        self.layout_show_grid_var.set(bool(data.get("layout_show_grid", True)))
+        self.layout_show_guides_var.set(bool(data.get("layout_show_guides", False)))
+        self.tile_size_mode_var.set(data.get("tile_size_mode", "Force"))
         self.tooltips_enabled_var.set(bool(data.get("tooltips_enabled", True)))
         self.theme_var.set(data.get("theme", "Light"))
         window_size = data.get("window_size")
@@ -731,8 +2219,10 @@ class App:
             self.update_recent_presets_dropdown()
 
         prefixes = data.get("prefixes", {})
-        for name, var in self.prefix_vars.items():
-            var.set(bool(prefixes.get(name, True)))
+        if isinstance(prefixes, dict) and prefixes:
+            self.set_prefixes(prefixes)
+        elif not self.prefix_vars:
+            self.render_prefix_checkboxes()
 
         self.refresh_folders()
         rules = data.get("folder_rules", {})
@@ -741,7 +2231,12 @@ class App:
                 self.folder_rows[name]["include_var"].set(rule.get("include", True))
                 self.folder_rows[name]["mode_var"].set(rule.get("mode", "Process"))
 
+        self.refresh_layout_folders()
         self.update_color_mode()
+        self.update_sprite_layout_controls()
+        self.update_sprite_padding_controls()
+        self.update_tile_layout_controls()
+        self.update_layout_type_controls()
         self.apply_theme(self.theme_var.get())
 
     def save_preset(self):
@@ -832,7 +2327,7 @@ class App:
         self.root.destroy()
 
     def run(self):
-        if self.running:
+        if self.running or self.sheet_running or self.tile_running:
             return
         if Image is None:
             messagebox.showerror("Pillow not installed", f"Install Pillow first.\n\n{PIL_IMPORT_ERROR}")
@@ -880,10 +2375,9 @@ class App:
             replace_pair = (hex_to_rgb(src), hex_to_rgb(dst))
             fill_rgb = None
 
-        prefixes = [name for name, var in self.prefix_vars.items() if var.get()]
-        extra = [p.strip() for p in self.extra_prefix_var.get().split(",") if p.strip()]
-        prefixes.extend(extra)
+        prefixes = self.get_selected_prefixes()
         prefix_re = build_prefix_regex(prefixes)
+        keep_prefixes = self.keep_prefixes_var.get()
 
         rules = self.get_folder_rules()
 
@@ -906,6 +2400,12 @@ class App:
         self.log.delete("1.0", tk.END)
         self.running = True
         self.run_button.configure(state="disabled")
+        if hasattr(self, "preview_button"):
+            self.preview_button.configure(state="disabled")
+        if hasattr(self, "sheet_run_button"):
+            self.sheet_run_button.configure(state="disabled")
+        if hasattr(self, "tile_run_button"):
+            self.tile_run_button.configure(state="disabled")
         self.progress.configure(value=0, maximum=1)
         self.status_label.configure(text="Scanning...")
 
@@ -922,6 +2422,7 @@ class App:
                 fill_rgb,
                 self.fill_shadows_var.get(),
                 prefix_re,
+                keep_prefixes,
                 rules,
                 allowed_dirs,
                 skip_existing,
@@ -935,8 +2436,350 @@ class App:
         )
         thread.start()
 
-    def worker(self, input_root, output_root, mode, target_rgbs, replace_pair, fill_rgb, fill_shadows, prefix_re, rules, allowed_dirs, skip_existing, skip_existing_files, exclude_folders, dry_run, csv_enabled, csv_path):
+    def preview_routing(self):
+        if self.running or self.previewing or self.sheet_running or self.tile_running:
+            return
+
+        input_root = self.input_var.get().strip()
+        output_root = self.output_var.get().strip()
+
+        if not os.path.isdir(input_root):
+            messagebox.showerror("Invalid input", "Input folder does not exist.")
+            return
+        if not output_root:
+            messagebox.showerror("Invalid output", "Output folder is empty.")
+            return
+
+        prefixes = self.get_selected_prefixes()
+        prefix_re = build_prefix_regex(prefixes)
+        keep_prefixes = self.keep_prefixes_var.get()
+        rules = self.get_folder_rules()
+        if self.process_all_var.get():
+            allowed_dirs = None
+        else:
+            allowed_dirs = {name for name, rule in rules.items() if rule.get("include")}
+
+        skip_existing = self.skip_existing_var.get()
+        skip_existing_files = self.skip_existing_files_var.get()
+        exclude_folders = {name.strip() for name in self.exclude_folders_var.get().split(",") if name.strip()}
+
+        self.previewing = True
+        self.run_button.configure(state="disabled")
+        if hasattr(self, "preview_button"):
+            self.preview_button.configure(state="disabled")
+        self.status_label.configure(text="Previewing...")
+
+        thread = threading.Thread(
+            target=self.preview_worker,
+            args=(
+                input_root,
+                output_root,
+                prefix_re,
+                keep_prefixes,
+                rules,
+                allowed_dirs,
+                skip_existing,
+                skip_existing_files,
+                exclude_folders,
+            ),
+            daemon=True,
+        )
+        thread.start()
+
+    def preview_worker(self, input_root, output_root, prefix_re, keep_prefixes, rules, allowed_dirs, skip_existing, skip_existing_files, exclude_folders):
+        try:
+            counts = {}
+            total_scanned = 0
+            skipped_existing_files = 0
+            skipped_prefixes = set()
+            existing_prefix_dirs = {}
+
+            top_dirs = [d for d in os.listdir(input_root) if os.path.isdir(os.path.join(input_root, d))]
+            top_dirs.sort(key=lambda s: s.lower())
+            for top in top_dirs:
+                if allowed_dirs is not None and top not in allowed_dirs:
+                    continue
+                if top in exclude_folders:
+                    continue
+                rule = rules.get(top, {})
+                folder_mode = rule.get("mode", "Process")
+                if folder_mode == "Skip":
+                    continue
+                for root, _, files in os.walk(os.path.join(input_root, top)):
+                    for file in files:
+                        if not file.lower().endswith(".png"):
+                            continue
+                        total_scanned += 1
+                        prefix_folder = output_prefix_folder(file, prefix_re)
+                        out_dir = output_root if not prefix_folder else os.path.join(output_root, prefix_folder)
+                        if skip_existing and prefix_folder:
+                            exists = existing_prefix_dirs.get(prefix_folder)
+                            if exists is None:
+                                exists = os.path.isdir(out_dir)
+                                existing_prefix_dirs[prefix_folder] = exists
+                            if exists:
+                                skipped_prefixes.add(prefix_folder)
+                                continue
+                        out_name = output_filename(file, prefix_re, keep_prefixes)
+                        out_path = os.path.join(out_dir, out_name)
+                        if skip_existing_files and os.path.exists(out_path):
+                            skipped_existing_files += 1
+                            continue
+                        counts[prefix_folder] = counts.get(prefix_folder, 0) + 1
+
+            lines = [f"Total PNGs scanned: {total_scanned}"]
+            if counts:
+                lines.append("")
+                lines.append("Routed by prefix:")
+                sorted_items = sorted(counts.items(), key=lambda item: (item[0] != "needs_sorting", item[0]))
+                for name, count in sorted_items:
+                    lines.append(f"- {name}: {count}")
+            else:
+                lines.append("No files matched the current filters.")
+
+            if skipped_prefixes:
+                lines.append("")
+                skipped_list = ", ".join(sorted(skipped_prefixes))
+                lines.append(f"Skipped (existing prefix folders): {skipped_list}")
+            if skipped_existing_files:
+                lines.append(f"Skipped (existing files): {skipped_existing_files}")
+
+            self.queue.put(("preview", "\n".join(lines)))
+        except Exception as exc:
+            self.queue.put(("preview_error", str(exc)))
+
+    def run_sprite_sheets(self):
+        if self.running or self.previewing or self.sheet_running or self.tile_running:
+            return
+        if Image is None:
+            messagebox.showerror("Pillow not installed", f"Install Pillow first.\n\n{PIL_IMPORT_ERROR}")
+            return
+
+        input_root = self.input_var.get().strip()
+        if not os.path.isdir(input_root):
+            messagebox.showerror("Invalid input", "Input folder does not exist.")
+            return
+
+        layout_mode = self.sprite_layout_var.get()
+        padding_mode = self.sprite_padding_mode_var.get()
+        try:
+            columns = max(1, int(self.sprite_columns_var.get()))
+            padding_value = max(0, int(self.sprite_padding_var.get()))
+        except ValueError:
+            messagebox.showerror("Invalid columns", "Columns must be a number.")
+            return
+        exclude_folders = {name.strip() for name in self.exclude_folders_var.get().split(",") if name.strip()}
+
+        self.sheet_log.delete("1.0", tk.END)
+        self.sheet_running = True
+        self.sheet_run_button.configure(state="disabled")
+        self.sheet_status_label.configure(text="Scanning...")
+        self.sheet_progress.start(10)
+        self.run_button.configure(state="disabled")
+        if hasattr(self, "preview_button"):
+            self.preview_button.configure(state="disabled")
+        self.tile_run_button.configure(state="disabled")
+
+        thread = threading.Thread(
+            target=self.sprite_worker,
+            args=(input_root, layout_mode, columns, padding_mode, padding_value, exclude_folders),
+            daemon=True,
+        )
+        thread.start()
+
+    def sprite_worker(self, input_root, layout_mode, columns, padding_mode, padding_value, exclude_folders):
+        try:
+            sheet_count = 0
+            folder_count = 0
+            for root, dirs, files in os.walk(input_root):
+                dirs[:] = [d for d in dirs if d not in ("sprite_sheets", "tilemaps")]
+                folder_name = os.path.basename(root)
+                if folder_name in exclude_folders:
+                    dirs[:] = []
+                    continue
+
+                png_files = [f for f in files if f.lower().endswith(".png")]
+                if not png_files:
+                    continue
+                folder_count += 1
+                groups = {}
+                for file in png_files:
+                    prefix = extract_group_prefix(file)
+                    groups.setdefault(prefix, []).append(file)
+
+                for prefix, group_files in groups.items():
+                    group_files.sort(key=sprite_sort_key)
+                    images = []
+                    try:
+                        for file in group_files:
+                            img = Image.open(os.path.join(root, file)).convert("RGBA")
+                            images.append(img)
+                        if not images:
+                            continue
+                        cell_w = max(img.width for img in images)
+                        cell_h = max(img.height for img in images)
+                        if padding_mode == "Frame width":
+                            pad = cell_w
+                        elif padding_mode == "Frame height":
+                            pad = cell_h
+                        else:
+                            pad = padding_value
+
+                        if layout_mode == "Horizontal":
+                            cols = len(images)
+                            rows = 1
+                        elif layout_mode == "Vertical":
+                            cols = 1
+                            rows = len(images)
+                        else:
+                            cols = max(1, columns)
+                            rows = int(math.ceil(len(images) / cols))
+
+                        sheet_w = (cols * cell_w) + (pad * max(0, cols - 1))
+                        sheet_h = (rows * cell_h) + (pad * max(0, rows - 1))
+                        sheet = Image.new("RGBA", (sheet_w, sheet_h), (0, 0, 0, 0))
+                        for idx, img in enumerate(images):
+                            row = idx // cols
+                            col = idx % cols
+                            x = col * (cell_w + pad)
+                            y = row * (cell_h + pad)
+                            sheet.paste(img, (x, y))
+
+                        out_dir = os.path.join(root, "sprite_sheets")
+                        os.makedirs(out_dir, exist_ok=True)
+                        out_name = f"{prefix}_Spritesheet.png"
+                        out_path = os.path.join(out_dir, out_name)
+                        sheet.save(out_path, format="PNG")
+                        sheet_count += 1
+
+                        rel_root = os.path.relpath(root, input_root)
+                        rel_root = "." if rel_root == "." else rel_root
+                        self.queue.put(("sheet_log", f"{rel_root} -> {out_name} ({len(images)} frames)"))
+                    finally:
+                        for img in images:
+                            img.close()
+
+            self.queue.put(("sheet_done", sheet_count, folder_count))
+        except Exception as exc:
+            self.queue.put(("sheet_error", str(exc)))
+
+    def run_tilemaps(self):
+        if self.running or self.previewing or self.sheet_running or self.tile_running:
+            return
+        if Image is None:
+            messagebox.showerror("Pillow not installed", f"Install Pillow first.\n\n{PIL_IMPORT_ERROR}")
+            return
+
+        input_root = self.input_var.get().strip()
+        if not os.path.isdir(input_root):
+            messagebox.showerror("Invalid input", "Input folder does not exist.")
+            return
+
+        layout_mode = self.tile_layout_var.get()
+        try:
+            columns = int(self.tile_columns_var.get())
+            tile_size = int(self.tile_size_var.get())
+        except ValueError:
+            messagebox.showerror("Invalid settings", "Tile size and columns must be numbers.")
+            return
+        export_meta = self.tile_export_meta_var.get()
+        exclude_folders = {name.strip() for name in self.exclude_folders_var.get().split(",") if name.strip()}
+
+        self.tile_log.delete("1.0", tk.END)
+        self.tile_running = True
+        self.tile_run_button.configure(state="disabled")
+        self.tile_status_label.configure(text="Scanning...")
+        self.tile_progress.start(10)
+        self.run_button.configure(state="disabled")
+        if hasattr(self, "preview_button"):
+            self.preview_button.configure(state="disabled")
+        self.sheet_run_button.configure(state="disabled")
+
+        thread = threading.Thread(
+            target=self.tile_worker,
+            args=(input_root, layout_mode, columns, tile_size, export_meta, exclude_folders),
+            daemon=True,
+        )
+        thread.start()
+
+    def tile_worker(self, input_root, layout_mode, columns, tile_size, export_meta, exclude_folders):
+        try:
+            tilemap_count = 0
+            folder_count = 0
+            for root, dirs, files in os.walk(input_root):
+                dirs[:] = [d for d in dirs if d not in ("sprite_sheets", "tilemaps")]
+                folder_name = os.path.basename(root)
+                if folder_name in exclude_folders:
+                    dirs[:] = []
+                    continue
+
+                png_files = sorted([f for f in files if f.lower().endswith(".png")], key=lambda s: s.lower())
+                if not png_files:
+                    continue
+                folder_count += 1
+                images = []
+                try:
+                    for file in png_files:
+                        img = Image.open(os.path.join(root, file)).convert("RGBA")
+                        images.append((file, img))
+
+                    if not images:
+                        continue
+
+                    max_w = max(img.width for _, img in images)
+                    max_h = max(img.height for _, img in images)
+                    cell_w = max(tile_size, max_w)
+                    cell_h = max(tile_size, max_h)
+
+                    if layout_mode == "Horizontal":
+                        cols = len(images)
+                        rows = 1
+                    elif layout_mode == "Vertical":
+                        cols = 1
+                        rows = len(images)
+                    else:
+                        cols = max(1, columns)
+                        rows = int(math.ceil(len(images) / cols))
+
+                    tilemap = Image.new("RGBA", (cols * cell_w, rows * cell_h), (0, 0, 0, 0))
+                    metadata = []
+                    for idx, (file, img) in enumerate(images):
+                        row = idx // cols
+                        col = idx % cols
+                        x = col * cell_w
+                        y = row * cell_h
+                        tilemap.paste(img, (x, y))
+                        metadata.append((file, x, y, img.width, img.height))
+
+                    out_dir = os.path.join(root, "tilemaps")
+                    os.makedirs(out_dir, exist_ok=True)
+                    out_name = f"{folder_name}_tilemap.png"
+                    out_path = os.path.join(out_dir, out_name)
+                    tilemap.save(out_path, format="PNG")
+
+                    if export_meta:
+                        meta_path = os.path.join(out_dir, f"{folder_name}_tilemap.csv")
+                        with open(meta_path, "w", newline="", encoding="utf-8") as handle:
+                            writer = csv.writer(handle)
+                            writer.writerow(["tilemap", "tile", "x", "y", "width", "height"])
+                            for file, x, y, w, h in metadata:
+                                writer.writerow([out_name, file, x, y, w, h])
+
+                    tilemap_count += 1
+                    rel_root = os.path.relpath(root, input_root)
+                    rel_root = "." if rel_root == "." else rel_root
+                    self.queue.put(("tile_log", f"{rel_root} -> {out_name} ({len(images)} tiles)"))
+                finally:
+                    for _, img in images:
+                        img.close()
+
+            self.queue.put(("tile_done", tilemap_count, folder_count))
+        except Exception as exc:
+            self.queue.put(("tile_error", str(exc)))
+
+    def worker(self, input_root, output_root, mode, target_rgbs, replace_pair, fill_rgb, fill_shadows, prefix_re, keep_prefixes, rules, allowed_dirs, skip_existing, skip_existing_files, exclude_folders, dry_run, csv_enabled, csv_path):
         tasks = []
+        existing_prefix_dirs = {}
         top_dirs = [d for d in os.listdir(input_root) if os.path.isdir(os.path.join(input_root, d))]
         top_dirs.sort(key=lambda s: s.lower())
         for top in top_dirs:
@@ -948,17 +2791,22 @@ class App:
             folder_mode = rule.get("mode", "Process")
             if folder_mode == "Skip":
                 continue
-            if skip_existing and os.path.isdir(os.path.join(output_root, top)):
-                continue
             custom_colors = rule.get("colors", "").strip()
             for root, _, files in os.walk(os.path.join(input_root, top)):
-                rel_dir = os.path.relpath(root, input_root)
-                out_dir = output_root if rel_dir == "." else os.path.join(output_root, rel_dir)
                 for file in files:
                     if not file.lower().endswith(".png"):
                         continue
                     in_path = os.path.join(root, file)
-                    out_name = output_filename(file, prefix_re)
+                    prefix_folder = output_prefix_folder(file, prefix_re)
+                    out_dir = output_root if not prefix_folder else os.path.join(output_root, prefix_folder)
+                    if skip_existing and prefix_folder:
+                        exists = existing_prefix_dirs.get(prefix_folder)
+                        if exists is None:
+                            exists = os.path.isdir(out_dir)
+                            existing_prefix_dirs[prefix_folder] = exists
+                        if exists:
+                            continue
+                    out_name = output_filename(file, prefix_re, keep_prefixes)
                     out_path = os.path.join(out_dir, out_name)
                     action = "process"
                     if skip_existing_files and os.path.exists(out_path):
@@ -979,6 +2827,21 @@ class App:
             self.queue.put(("status", "Done"))
             self.queue.put(("done", 0, 0, 0))
             return
+
+        conflicts = self.detect_conflicts(tasks)
+        if conflicts:
+            self.conflict_choice = None
+            self.conflict_event.clear()
+            conflict_files = sum(len(items) for items in conflicts.values())
+            self.queue.put(("conflicts", len(conflicts), conflict_files))
+            self.conflict_event.wait()
+            if self.conflict_choice == "cancel" or self.conflict_choice is None:
+                self.queue.put(("log", "Canceled due to naming conflicts."))
+                self.queue.put(("status", "Canceled"))
+                self.queue.put(("done", 0, 0, 0))
+                return
+            if self.conflict_choice == "copy":
+                self.apply_copy_suffixes(tasks, conflicts, output_root)
 
         if csv_enabled:
             ensure_csv_header(csv_path)
@@ -1066,6 +2929,108 @@ class App:
                             self.log.insert(tk.END, "Dry run mode: no files were written.\n")
                         self.running = False
                         self.run_button.configure(state="normal")
+                        if hasattr(self, "preview_button") and not self.previewing:
+                            self.preview_button.configure(state="normal")
+                        if hasattr(self, "sheet_run_button") and not self.sheet_running:
+                            self.sheet_run_button.configure(state="normal")
+                        if hasattr(self, "tile_run_button") and not self.tile_running:
+                            self.tile_run_button.configure(state="normal")
+                    elif kind == "conflicts":
+                        groups, files = msg[1], msg[2]
+                        prompt = (
+                            f"Naming conflicts detected.\n\n"
+                            f"Conflict groups: {groups}\n"
+                            f"Files affected: {files}\n\n"
+                            "Overwrite duplicates? (Yes = overwrite, No = add copy)"
+                        )
+                        choice = messagebox.askyesnocancel("Naming conflicts", prompt)
+                        if choice is None:
+                            self.conflict_choice = "cancel"
+                        elif choice:
+                            self.conflict_choice = "overwrite"
+                        else:
+                            self.conflict_choice = "copy"
+                        self.conflict_event.set()
+                    elif kind == "sheet_log":
+                        self.sheet_log.insert(tk.END, msg[1] + "\n")
+                        self.sheet_log.see(tk.END)
+                    elif kind == "sheet_done":
+                        sheet_count, folder_count = msg[1], msg[2]
+                        self.sheet_log.insert(tk.END, "\n")
+                        self.sheet_log.insert(
+                            tk.END,
+                            f"Done. Sheets created: {sheet_count}, folders scanned: {folder_count}\n",
+                        )
+                        self.sheet_running = False
+                        self.sheet_progress.stop()
+                        self.sheet_status_label.configure(text="Done")
+                        self.sheet_run_button.configure(state="normal")
+                        if not self.running and not self.tile_running:
+                            self.run_button.configure(state="normal")
+                            if hasattr(self, "preview_button"):
+                                self.preview_button.configure(state="normal")
+                            if hasattr(self, "tile_run_button"):
+                                self.tile_run_button.configure(state="normal")
+                    elif kind == "sheet_error":
+                        messagebox.showerror("Sprite sheet error", msg[1])
+                        self.sheet_running = False
+                        self.sheet_progress.stop()
+                        self.sheet_status_label.configure(text="")
+                        self.sheet_run_button.configure(state="normal")
+                        if not self.running and not self.tile_running:
+                            self.run_button.configure(state="normal")
+                            if hasattr(self, "preview_button"):
+                                self.preview_button.configure(state="normal")
+                            if hasattr(self, "tile_run_button"):
+                                self.tile_run_button.configure(state="normal")
+                    elif kind == "tile_log":
+                        self.tile_log.insert(tk.END, msg[1] + "\n")
+                        self.tile_log.see(tk.END)
+                    elif kind == "tile_done":
+                        tile_count, folder_count = msg[1], msg[2]
+                        self.tile_log.insert(tk.END, "\n")
+                        self.tile_log.insert(
+                            tk.END,
+                            f"Done. Tilemaps created: {tile_count}, folders scanned: {folder_count}\n",
+                        )
+                        self.tile_running = False
+                        self.tile_progress.stop()
+                        self.tile_status_label.configure(text="Done")
+                        self.tile_run_button.configure(state="normal")
+                        if not self.running and not self.sheet_running:
+                            self.run_button.configure(state="normal")
+                            if hasattr(self, "preview_button"):
+                                self.preview_button.configure(state="normal")
+                            if hasattr(self, "sheet_run_button"):
+                                self.sheet_run_button.configure(state="normal")
+                    elif kind == "tile_error":
+                        messagebox.showerror("Tilemap error", msg[1])
+                        self.tile_running = False
+                        self.tile_progress.stop()
+                        self.tile_status_label.configure(text="")
+                        self.tile_run_button.configure(state="normal")
+                        if not self.running and not self.sheet_running:
+                            self.run_button.configure(state="normal")
+                            if hasattr(self, "preview_button"):
+                                self.preview_button.configure(state="normal")
+                            if hasattr(self, "sheet_run_button"):
+                                self.sheet_run_button.configure(state="normal")
+                    elif kind == "preview":
+                        messagebox.showinfo("Preview routing", msg[1])
+                        self.previewing = False
+                        if hasattr(self, "preview_button"):
+                            self.preview_button.configure(state="normal")
+                        if not self.running:
+                            self.run_button.configure(state="normal")
+                        self.status_label.configure(text="")
+                    elif kind == "preview_error":
+                        messagebox.showerror("Preview error", msg[1])
+                        self.previewing = False
+                        if hasattr(self, "preview_button"):
+                            self.preview_button.configure(state="normal")
+                        if not self.running:
+                            self.run_button.configure(state="normal")
+                        self.status_label.configure(text="")
                 else:
                     self.log.insert(tk.END, str(msg) + "\n")
                     self.log.see(tk.END)
@@ -1075,7 +3040,10 @@ class App:
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    if TkinterDnD is not None:
+        root = TkinterDnD.Tk()
+    else:
+        root = tk.Tk()
     root.withdraw()
 
     splash = tk.Toplevel(root)
@@ -1096,6 +3064,8 @@ if __name__ == "__main__":
 
     credit_font = ("Segoe UI", 11)
     credit_text = "Created by Koma"
+    version_font = ("Segoe UI", 10)
+    version_text = APP_VERSION
     credit_label = tk.Label(
         splash,
         text=credit_text,
@@ -1106,13 +3076,24 @@ if __name__ == "__main__":
     credit_label.update_idletasks()
     credit_w = credit_label.winfo_reqwidth()
     credit_h = credit_label.winfo_reqheight()
+    version_label = tk.Label(
+        splash,
+        text=version_text,
+        font=version_font,
+        background="#1f1f1f",
+        foreground="#b5b5b5",
+    )
+    version_label.update_idletasks()
+    version_w = version_label.winfo_reqwidth()
+    version_h = version_label.winfo_reqheight()
 
     pad_x = 40
     pad_top = 20
     pad_mid = 10
+    pad_mid2 = 4
     pad_bottom = 18
-    splash_width = max(logo_w, credit_w) + pad_x * 2
-    splash_height = pad_top + logo_h + pad_mid + credit_h + pad_bottom
+    splash_width = max(logo_w, credit_w, version_w) + pad_x * 2
+    splash_height = pad_top + logo_h + pad_mid + credit_h + pad_mid2 + version_h + pad_bottom
     splash_width = max(splash_width, 320)
     splash_height = max(splash_height, 140)
 
@@ -1133,7 +3114,8 @@ if __name__ == "__main__":
             foreground="#ffffff",
         ).pack(pady=(pad_top, pad_mid))
 
-    credit_label.pack(pady=(0, pad_bottom))
+    credit_label.pack(pady=(0, pad_mid2))
+    version_label.pack(pady=(0, pad_bottom))
 
     def start_app():
         try:
