@@ -1,28 +1,40 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+import tkinterdnd2
+
+block_cipher = None
+
+tkdnd_dir = os.path.join(os.path.dirname(tkinterdnd2.__file__), "tkdnd")
 
 a = Analysis(
-    ['app\\png_transparency_gui.py'],
+    ["app\\png_transparency_gui.py"],
     pathex=[],
     binaries=[],
-    datas=[('app\\ChromaForge_logo.png', '.'), ('app\\ChromaForge_logo.ico', '.'), ('C:\\Users\\TA-Ko\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python311\\site-packages\\tkinterdnd2\\tkdnd', 'tkinterdnd2\\tkdnd')],
+    datas=[
+        ("app\\ChromaForge_logo.png", "."),
+        ("app\\ChromaForge_logo.ico", "."),
+        (tkdnd_dir, "tkinterdnd2\\tkdnd"),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
     noarchive=False,
-    optimize=0,
+    cipher=block_cipher,
 )
-pyz = PYZ(a.pure)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
+    a.zipfiles,
     a.datas,
     [],
-    name='ChromaForge',
+    name="ChromaForge",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -30,10 +42,5 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=['app\\ChromaForge_logo.ico'],
+    icon="app\\ChromaForge_logo.ico",
 )

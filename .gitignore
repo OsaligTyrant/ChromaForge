@@ -1,6 +1,5 @@
 LOCAL_NOTES.txt
 build/
-ChromaForge.spec
 __pycache__/
 *.pyc
 settings/last_settings.json
