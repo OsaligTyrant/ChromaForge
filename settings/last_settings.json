@@ -1,0 +1,145 @@
+{
+  "input": "C:/Users/TA-Ko/Downloads/DirectorCastRipper_D12/Exports/TWO/Sprite Materials/Characters/New",
+  "output": "C:\\Users\\TA-Ko\\Downloads\\DirectorCastRipper_D12\\Exports\\TWO\\Sprite Materials\\Characters\\New",
+  "mode": "transparent",
+  "color_list": "#00FF00",
+  "fill_color": "",
+  "fill_shadows": false,
+  "replace_from": "",
+  "replace_to": "",
+  "extra_prefixes": "",
+  "keep_prefixes": false,
+  "prefixes": {
+    "Characters": true,
+    "Chars": true,
+    "FX": true,
+    "Inventory": true,
+    "MapGFX": true
+  },
+  "process_all": true,
+  "skip_existing_folders": true,
+  "skip_existing_files": false,
+  "dry_run": false,
+  "csv_log": false,
+  "csv_path": "",
+  "exclude_folders": "",
+  "sprite_layout": "Grid",
+  "sprite_columns": 4,
+  "sprite_padding_mode": "Fixed",
+  "sprite_padding": 0,
+  "tile_layout": "Grid",
+  "tile_columns": 15,
+  "tile_size": 32,
+  "tile_export_meta": true,
+  "layout_type": "Spritesheet",
+  "layout_folder": "Character Body and Head",
+  "layout_output_name": "Characters",
+  "layout_mode": "Grid",
+  "layout_columns": 4,
+  "layout_rows": 0,
+  "layout_snap": true,
+  "layout_show_grid": true,
+  "layout_show_guides": false,
+  "tile_size_mode": "Force",
+  "split_sheet_path": "C:/Users/TA-Ko/Projects/Game Art/Monsters/bee.png",
+  "split_output_dir": "C:/Users/TA-Ko/Projects/Game Art/Monsters\\GrueBloodyGrin_sprite_frames",
+  "split_base_name": "GrueBloodyGrin",
+  "split_cell_w": 32,
+  "split_cell_h": 32,
+  "split_columns": 6,
+  "split_rows": 4,
+  "split_pad_x": 0,
+  "split_pad_y": 0,
+  "split_offset_x": 0,
+  "split_offset_y": 0,
+  "split_show_grid": true,
+  "recent_presets": [],
+  "tooltips_enabled": true,
+  "theme": "Dark",
+  "window_size": [
+    1920,
+    1017
+  ],
+  "folder_rules": {
+    "Armor": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Arrows": {
+      "include": false,
+      "mode": "Process"
+    },
+    "blue": {
+      "include": true,
+      "mode": "Process"
+    },
+    "Boots or Feet": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Character Body and Head": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Character Wings": {
+      "include": false,
+      "mode": "Process"
+    },
+    "First Star Online 1.6": {
+      "include": true,
+      "mode": "Process"
+    },
+    "FX Animations": {
+      "include": false,
+      "mode": "Process"
+    },
+    "green": {
+      "include": true,
+      "mode": "Process"
+    },
+    "hands": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Helm": {
+      "include": false,
+      "mode": "Process"
+    },
+    "icons": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Monsters": {
+      "include": true,
+      "mode": "Process"
+    },
+    "red": {
+      "include": true,
+      "mode": "Process"
+    },
+    "RoM 1.3A Jan 2025": {
+      "include": false,
+      "mode": "Process"
+    },
+    "shield": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Spells": {
+      "include": false,
+      "mode": "Process"
+    },
+    "tiles": {
+      "include": false,
+      "mode": "Process"
+    },
+    "TileSheets": {
+      "include": true,
+      "mode": "Process"
+    },
+    "weapons": {
+      "include": false,
+      "mode": "Process"
+    }
+  }
+}
