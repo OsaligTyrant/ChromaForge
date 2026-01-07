@@ -1,4 +1,5 @@
 LOCAL_NOTES.txt
+LOCAL_RELEASES.md
 build/
 __pycache__/
 *.pyc
