@@ -1,0 +1,94 @@
+{
+  "input": "C:\\Users\\TA-Ko\\Downloads\\DirectorCastRipper_D12\\Exports\\TWO\\Sprite Materials\\Characters\\Old",
+  "output": "C:\\Users\\TA-Ko\\Downloads\\DirectorCastRipper_D12\\Exports\\TWO\\Sprite Materials\\Characters\\New",
+  "mode": "transparent",
+  "color_list": "#00FF00",
+  "fill_color": "",
+  "fill_shadows": false,
+  "replace_from": "",
+  "replace_to": "",
+  "extra_prefixes": "",
+  "prefixes": {
+    "Characters": true,
+    "Inventory": true,
+    "FX": true,
+    "Chars": true,
+    "MapGFX": true
+  },
+  "process_all": true,
+  "skip_existing_folders": true,
+  "skip_existing_files": false,
+  "dry_run": false,
+  "csv_log": false,
+  "csv_path": "",
+  "exclude_folders": "",
+  "recent_presets": [],
+  "tooltips_enabled": true,
+  "theme": "Dark",
+  "window_size": [
+    907,
+    908
+  ],
+  "folder_rules": {
+    "Armor": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Arrows": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Boots or Feet": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Character Body and Head": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Character Wings": {
+      "include": false,
+      "mode": "Process"
+    },
+    "FX Animations": {
+      "include": false,
+      "mode": "Process"
+    },
+    "hands": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Helm": {
+      "include": false,
+      "mode": "Process"
+    },
+    "icons": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Monsters": {
+      "include": true,
+      "mode": "Process"
+    },
+    "RoM 1.3A Jan 2025": {
+      "include": false,
+      "mode": "Process"
+    },
+    "shield": {
+      "include": false,
+      "mode": "Process"
+    },
+    "Spells": {
+      "include": false,
+      "mode": "Process"
+    },
+    "tiles": {
+      "include": false,
+      "mode": "Process"
+    },
+    "weapons": {
+      "include": false,
+      "mode": "Process"
+    }
+  }
+}
