@@ -1,7 +1,7 @@
 # ChromaForge
 ChromaForge is a desktop app that batch-edits PNGs, groups outputs by filename prefixes, and builds sprite sheets and tilemaps using a simple GUI.
 
-Version: Beta 2.2.1
+Version: Beta 3.1.1
 
 ## Launch
 - Run `ChromaForge.exe` from the main folder.

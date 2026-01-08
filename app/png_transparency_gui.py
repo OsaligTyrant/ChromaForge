@@ -28,7 +28,7 @@ else:
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_NAME = "ChromaForge"
-APP_VERSION = "Beta 2.2.1"
+APP_VERSION = "Beta 3.1.1"
 APP_TITLE = f"{APP_NAME} - {APP_VERSION}"
 THEMES = ["Light", "Dark"]
 def get_app_home():
@@ -321,6 +321,9 @@ class App:
         self.layout_selected_ids = set()
         self.layout_drag_start = None
         self.layout_drag_positions = {}
+        self.layout_drag_moved = False
+        self.layout_drag_anchor_id = None
+        self.layout_pending_select_id = None
         self.layout_pos_x_var = tk.StringVar(value="")
         self.layout_pos_y_var = tk.StringVar(value="")
         self.layout_zoom = 1.0
@@ -333,6 +336,12 @@ class App:
         self.layout_select_box_start = None
         self.layout_select_box_id = None
         self.layout_select_box_add = False
+        self.layout_select_box_moved = False
+        self.layout_undo_stack = []
+        self.layout_guides_enabled = False
+        self.layout_guides = {"h": [], "v": []}
+        self.layout_guide_drag = None
+        self.layout_guide_threshold = 6
         self.layout_anchor_mode_var = tk.StringVar(value="Off")
         self.layout_anchor_source_var = tk.StringVar(value="Auto")
         self.layout_anchor_type_var = tk.StringVar(value="Bottom")
@@ -363,6 +372,9 @@ class App:
         self.split_preview_photo = None
         self.split_resize_axis = None
         self.split_resize_anchor = 0
+        self.split_resize_start = None
+        self.split_resize_moved = False
+        self.split_undo_stack = []
 
         self.prefix_vars = {}
         self.conflict_event = threading.Event()
@@ -386,6 +398,7 @@ class App:
 
         notebook = ttk.Notebook(root)
         notebook.grid(row=0, column=0, sticky="nsew")
+        self.main_notebook = notebook
 
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
@@ -771,19 +784,47 @@ class App:
 
         layout_canvas_frame = ttk.LabelFrame(layout_body, text="Canvas")
         layout_canvas_frame.grid(row=0, column=1, sticky="nsew")
-        layout_canvas_frame.rowconfigure(0, weight=1)
+        layout_canvas_frame.rowconfigure(1, weight=1)
         layout_canvas_frame.columnconfigure(0, weight=1)
+        layout_canvas_header = ttk.Frame(layout_canvas_frame)
+        layout_canvas_header.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 0))
+        layout_canvas_header.columnconfigure(0, weight=1)
+        ttk.Button(layout_canvas_header, text="Undo", command=self.layout_undo).grid(row=0, column=1, padx=3)
+        ttk.Button(layout_canvas_header, text="+", command=lambda: self.layout_set_zoom(self.layout_zoom * 1.1)).grid(
+            row=0, column=2, padx=3
+        )
+        ttk.Button(layout_canvas_header, text="-", command=lambda: self.layout_set_zoom(self.layout_zoom * 0.9)).grid(
+            row=0, column=3, padx=3
+        )
         self.layout_canvas = tk.Canvas(layout_canvas_frame, width=520, height=360, highlightthickness=1)
-        self.layout_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.layout_canvas.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
         layout_canvas_scroll_y = ttk.Scrollbar(layout_canvas_frame, orient="vertical", command=self.layout_canvas.yview)
-        layout_canvas_scroll_y.grid(row=0, column=1, sticky="ns", pady=6)
+        layout_canvas_scroll_y.grid(row=1, column=1, sticky="ns", pady=6)
         layout_canvas_scroll_x = ttk.Scrollbar(layout_canvas_frame, orient="horizontal", command=self.layout_canvas.xview)
-        layout_canvas_scroll_x.grid(row=1, column=0, sticky="ew", padx=6)
+        layout_canvas_scroll_x.grid(row=2, column=0, sticky="ew", padx=6)
         self.layout_canvas.configure(yscrollcommand=layout_canvas_scroll_y.set, xscrollcommand=layout_canvas_scroll_x.set)
 
-        layout_options = ttk.LabelFrame(layout_body, text="Layout Options")
-        layout_options.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
+        layout_options_outer = ttk.LabelFrame(layout_body, text="Layout Options")
+        layout_options_outer.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
+        layout_options_outer.rowconfigure(0, weight=1)
+        layout_options_outer.columnconfigure(0, weight=1)
+        layout_options_canvas = tk.Canvas(layout_options_outer, highlightthickness=0)
+        layout_options_canvas.grid(row=0, column=0, sticky="nsew")
+        layout_options_scroll = ttk.Scrollbar(layout_options_outer, orient="vertical", command=layout_options_canvas.yview)
+        layout_options_scroll.grid(row=0, column=1, sticky="ns")
+        layout_options_canvas.configure(yscrollcommand=layout_options_scroll.set)
+        layout_options = ttk.Frame(layout_options_canvas)
+        layout_options_window = layout_options_canvas.create_window((0, 0), window=layout_options, anchor="nw")
         layout_options.columnconfigure(1, weight=1)
+
+        def _layout_options_resize(_event):
+            layout_options_canvas.configure(scrollregion=layout_options_canvas.bbox("all"))
+
+        def _layout_options_canvas_resize(event):
+            layout_options_canvas.itemconfigure(layout_options_window, width=event.width)
+
+        layout_options.bind("<Configure>", _layout_options_resize)
+        layout_options_canvas.bind("<Configure>", _layout_options_canvas_resize)
         self.layout_name_label = ttk.Label(layout_options, text="Spritesheet name")
         self.layout_name_label.grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
         ttk.Entry(layout_options, textvariable=self.layout_output_var).grid(row=0, column=1, columnspan=3, sticky="ew", padx=6, pady=(6, 2))
@@ -824,6 +865,7 @@ class App:
         ttk.Button(layout_align_frame, text="Copy Selected", command=self.layout_copy_selected).grid(row=0, column=3, padx=3)
         ttk.Button(layout_align_frame, text="Remove Selected", command=self.layout_remove_selected).grid(row=0, column=4, padx=3)
         ttk.Button(layout_align_frame, text="Toggle Visible", command=self.layout_toggle_selected_visibility).grid(row=1, column=0, padx=3, pady=(4, 0))
+        ttk.Button(layout_align_frame, text="Snap Guides", command=self.layout_toggle_guides).grid(row=1, column=1, padx=3, pady=(4, 0))
 
         layout_anchor_frame = ttk.LabelFrame(layout_options, text="Anchors")
         layout_anchor_frame.grid(row=9, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
@@ -968,11 +1010,16 @@ class App:
         self.layout_canvas.bind("<B1-Motion>", self.layout_on_drag)
         self.layout_canvas.bind("<ButtonRelease-1>", self.layout_on_release)
         self.layout_canvas.bind("<MouseWheel>", self.layout_on_mousewheel)
+        self.layout_canvas.bind("<Up>", lambda e: self.layout_nudge(0, -1, e))
+        self.layout_canvas.bind("<Down>", lambda e: self.layout_nudge(0, 1, e))
+        self.layout_canvas.bind("<Left>", lambda e: self.layout_nudge(-1, 0, e))
+        self.layout_canvas.bind("<Right>", lambda e: self.layout_nudge(1, 0, e))
         self.layout_layers_listbox.bind("<<ListboxSelect>>", self.layout_on_layer_select)
         self.layout_layers_listbox.bind("<ButtonPress-1>", self.layout_layers_on_press)
         self.layout_layers_listbox.bind("<B1-Motion>", self.layout_layers_on_drag)
         self.layout_layers_listbox.bind("<ButtonRelease-1>", self.layout_layers_on_release)
         self.setup_layout_dnd()
+        self.root.bind_all("<Control-z>", self.on_global_undo)
 
         split_main = ttk.Frame(self.main_split_tab, padding=10)
         split_main.grid(row=0, column=0, sticky="nsew")
@@ -1003,14 +1050,24 @@ class App:
 
         split_canvas_frame = ttk.LabelFrame(split_body, text="Spritesheet")
         split_canvas_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        split_canvas_frame.rowconfigure(0, weight=1)
+        split_canvas_frame.rowconfigure(1, weight=1)
         split_canvas_frame.columnconfigure(0, weight=1)
+        split_canvas_header = ttk.Frame(split_canvas_frame)
+        split_canvas_header.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 0))
+        split_canvas_header.columnconfigure(0, weight=1)
+        ttk.Button(split_canvas_header, text="Undo", command=self.split_undo).grid(row=0, column=1, padx=3)
+        ttk.Button(split_canvas_header, text="+", command=lambda: self.split_set_zoom(self.split_zoom * 1.1)).grid(
+            row=0, column=2, padx=3
+        )
+        ttk.Button(split_canvas_header, text="-", command=lambda: self.split_set_zoom(self.split_zoom * 0.9)).grid(
+            row=0, column=3, padx=3
+        )
         self.split_canvas = tk.Canvas(split_canvas_frame, width=520, height=360, highlightthickness=1)
-        self.split_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.split_canvas.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
         split_canvas_scroll_y = ttk.Scrollbar(split_canvas_frame, orient="vertical", command=self.split_canvas.yview)
-        split_canvas_scroll_y.grid(row=0, column=1, sticky="ns", pady=6)
+        split_canvas_scroll_y.grid(row=1, column=1, sticky="ns", pady=6)
         split_canvas_scroll_x = ttk.Scrollbar(split_canvas_frame, orient="horizontal", command=self.split_canvas.xview)
-        split_canvas_scroll_x.grid(row=1, column=0, sticky="ew", padx=6)
+        split_canvas_scroll_x.grid(row=2, column=0, sticky="ew", padx=6)
         self.split_canvas.configure(yscrollcommand=split_canvas_scroll_y.set, xscrollcommand=split_canvas_scroll_x.set)
 
         split_options = ttk.LabelFrame(split_body, text="Split Options")
@@ -1214,6 +1271,18 @@ class App:
         if self._resize_save_after_id:
             self.root.after_cancel(self._resize_save_after_id)
         self._resize_save_after_id = self.root.after(400, self.write_settings_or_error)
+
+    def on_global_undo(self, _event=None):
+        if not hasattr(self, "main_notebook"):
+            return
+        try:
+            tab_text = self.main_notebook.tab(self.main_notebook.select(), "text")
+        except Exception:
+            return
+        if tab_text == "Layout Editor (Assemble)":
+            self.layout_undo()
+        elif tab_text == "Layout Editor (Split)":
+            self.split_undo()
 
     def update_color_mode(self):
         mode = self.mode_var.get()
@@ -1649,6 +1718,107 @@ class App:
             return ordered
         return [item for item in ordered if self.layout_item_is_visible(item)]
 
+    def layout_push_undo(self):
+        if not self.layout_items:
+            return
+        snapshot = {item_id: (item["x"], item["y"]) for item_id, item in self.layout_items.items()}
+        if self.layout_undo_stack and self.layout_undo_stack[-1] == snapshot:
+            return
+        self.layout_undo_stack.append(snapshot)
+        if len(self.layout_undo_stack) > 10:
+            self.layout_undo_stack.pop(0)
+
+    def layout_undo(self, _event=None):
+        if not self.layout_undo_stack:
+            return
+        snapshot = self.layout_undo_stack.pop()
+        for item_id, pos in snapshot.items():
+            item = self.layout_items.get(item_id)
+            if not item:
+                continue
+            item["x"], item["y"] = pos
+        self.layout_redraw()
+        self.layout_update_position_fields()
+
+    def layout_nudge(self, dx, dy, event=None):
+        if not self.layout_selected_ids:
+            return
+        step = 4 if event and (event.state & 0x0001) else 1
+        dx *= step
+        dy *= step
+        self.layout_push_undo()
+        for item_id in self.layout_selected_ids:
+            item = self.layout_items.get(item_id)
+            if not item:
+                continue
+            item["x"] += dx
+            item["y"] += dy
+        if self.layout_snap_var.get() and self.layout_mode_var.get() == "Grid":
+            self.layout_snap_selected(record_undo=False)
+        self.layout_redraw()
+        self.layout_update_position_fields()
+
+    def layout_toggle_guides(self):
+        self.layout_guides_enabled = not self.layout_guides_enabled
+        if self.layout_guides_enabled and not (self.layout_guides["h"] or self.layout_guides["v"]):
+            cell_w, cell_h, pad = self.layout_get_cell_and_padding()
+            cols = max(1, int(self.layout_grid_columns_var.get()))
+            rows = int(self.layout_grid_rows_var.get())
+            max_x = max((item["x"] + item["width"]) for item in self.layout_items.values()) if self.layout_items else 0
+            max_y = max((item["y"] + item["height"]) for item in self.layout_items.values()) if self.layout_items else 0
+            if self.layout_mode_var.get() == "Grid":
+                step_x = cell_w + pad
+                step_y = cell_h + pad
+                if rows <= 0 and step_x > 0 and step_y > 0 and self.layout_items:
+                    row_indices = [int(item["y"] // step_y) for item in self.layout_items.values()]
+                    rows = max(row_indices) + 1 if row_indices else 1
+                if rows <= 0:
+                    rows = 1
+                grid_w = (cols * cell_w) + (pad * max(0, cols - 1))
+                grid_h = (rows * cell_h) + (pad * max(0, rows - 1))
+            else:
+                grid_w = max_x
+                grid_h = max_y
+            center_x = grid_w / 2 if grid_w else 0
+            center_y = grid_h / 2 if grid_h else 0
+            self.layout_guides["v"] = [center_x]
+            self.layout_guides["h"] = [center_y]
+        self.layout_redraw()
+
+    def layout_guide_hit(self, canvas_x, canvas_y):
+        if not self.layout_guides_enabled:
+            return None
+        x = canvas_x / self.layout_zoom
+        y = canvas_y / self.layout_zoom
+        threshold = self.layout_guide_threshold / self.layout_zoom
+        for idx, gx in enumerate(self.layout_guides.get("v", [])):
+            if abs(x - gx) <= threshold:
+                return ("v", idx)
+        for idx, gy in enumerate(self.layout_guides.get("h", [])):
+            if abs(y - gy) <= threshold:
+                return ("h", idx)
+        return None
+
+    def layout_get_anchor_offset(self, item):
+        anchor = item.get("anchor")
+        if anchor:
+            return anchor["x"], anchor["y"]
+        return item["width"] / 2, item["height"]
+
+    def layout_apply_guide_snap(self, anchor_x, anchor_y):
+        snap_x = anchor_x
+        snap_y = anchor_y
+        threshold = self.layout_guide_threshold
+        for gx in self.layout_guides.get("v", []):
+            if abs(anchor_x - gx) <= threshold:
+                snap_x = gx
+                break
+        for gy in self.layout_guides.get("h", []):
+            if abs(anchor_y - gy) <= threshold:
+                snap_y = gy
+                break
+        return snap_x, snap_y
+
     def layout_update_position_fields(self):
         if not self.layout_selected_ids:
             self.layout_pos_x_var.set("")
@@ -1915,6 +2085,7 @@ class App:
         target_ids = list(self.layout_selected_ids) if self.layout_selected_ids else [
             item_id for item_id, item in self.layout_items.items() if item.get("layer_id") == active_layer["id"]
         ]
+        self.layout_push_undo()
         moved = False
         for item_id in target_ids:
             item = self.layout_items.get(item_id)
@@ -1955,6 +2126,7 @@ class App:
         except ValueError:
             messagebox.showerror("Invalid position", "X and Y must be whole numbers.")
             return
+        self.layout_push_undo()
         for item_id in self.layout_selected_ids:
             item = self.layout_items[item_id]
             new_x = item["x"] if x_val is None else x_val
@@ -1968,13 +2140,14 @@ class App:
                 height = item["height"] * self.layout_zoom
                 self.layout_canvas.coords(item["rect_id"], canvas_x, canvas_y, canvas_x + width, canvas_y + height)
         if self.layout_snap_var.get() and self.layout_mode_var.get() == "Grid":
-            self.layout_snap_selected()
+            self.layout_snap_selected(record_undo=False)
         self.layout_redraw()
         self.layout_update_position_fields()
 
     def layout_align(self, direction):
         if len(self.layout_selected_ids) < 2:
             return
+        self.layout_push_undo()
         selected = list(self.layout_selected_ids)
         ref = self.layout_items[selected[0]]
         ref_x = ref["x"]
@@ -1992,7 +2165,7 @@ class App:
                 height = item["height"] * self.layout_zoom
                 self.layout_canvas.coords(item["rect_id"], canvas_x, canvas_y, canvas_x + width, canvas_y + height)
         if self.layout_snap_var.get() and self.layout_mode_var.get() == "Grid":
-            self.layout_snap_selected()
+            self.layout_snap_selected(record_undo=False)
         self.layout_redraw()
         self.layout_update_position_fields()
 
@@ -2002,6 +2175,7 @@ class App:
         if self.layout_mode_var.get() != "Grid":
             messagebox.showinfo("Center in cell", "Centering requires Grid mode.")
             return
+        self.layout_push_undo()
         cell_w, cell_h, pad = self.layout_get_cell_and_padding()
         step_x = cell_w + pad
         step_y = cell_h + pad
@@ -2327,19 +2501,31 @@ class App:
         self.layout_update_position_fields()
 
     def layout_on_press(self, event):
+        self.layout_canvas.focus_set()
         canvas_x = self.layout_canvas.canvasx(event.x)
         canvas_y = self.layout_canvas.canvasy(event.y)
+        guide_hit = self.layout_guide_hit(canvas_x, canvas_y)
+        if guide_hit:
+            self.layout_guide_drag = guide_hit
+            self.layout_drag_start = None
+            self.layout_select_box_start = None
+            self.layout_pending_select_id = None
+            return
         item_id = self.layout_find_item_at(canvas_x, canvas_y)
+        ctrl = bool(event.state & 0x0004)
         if not item_id:
-            add = bool(event.state & 0x0004)
-            if not add:
+            if not ctrl:
                 for selected in list(self.layout_selected_ids):
                     self.layout_clear_selection_rect(selected)
                 self.layout_selected_ids.clear()
                 self.layout_update_position_fields()
             self.layout_drag_start = None
+            self.layout_drag_moved = False
+            self.layout_drag_anchor_id = None
+            self.layout_pending_select_id = None
             self.layout_select_box_start = (canvas_x, canvas_y)
-            self.layout_select_box_add = add
+            self.layout_select_box_add = ctrl
+            self.layout_select_box_moved = False
             self.layout_select_box_id = self.layout_canvas.create_rectangle(
                 canvas_x,
                 canvas_y,
@@ -2350,23 +2536,45 @@ class App:
                 tags=("selection_box",),
             )
             return
-        add = bool(event.state & 0x0001)
-        toggle = bool(event.state & 0x0004)
-        self.layout_select_item(item_id, add=add, toggle=toggle)
+        if ctrl:
+            self.layout_select_item(item_id, add=False, toggle=True)
+            self.layout_pending_select_id = None
+        else:
+            if item_id in self.layout_selected_ids:
+                self.layout_pending_select_id = None
+            elif self.layout_selected_ids:
+                self.layout_pending_select_id = item_id
+            else:
+                self.layout_select_item(item_id, add=False, toggle=False)
+                self.layout_pending_select_id = None
         x, y = self.layout_from_canvas(canvas_x, canvas_y)
         self.layout_drag_start = (x, y)
         self.layout_drag_positions = {
             selected: (self.layout_items[selected]["x"], self.layout_items[selected]["y"])
             for selected in self.layout_selected_ids
         }
+        self.layout_drag_moved = False
+        self.layout_drag_anchor_id = item_id
 
     def layout_on_drag(self, event):
+        if self.layout_guide_drag:
+            canvas_x = self.layout_canvas.canvasx(event.x)
+            canvas_y = self.layout_canvas.canvasy(event.y)
+            axis, index = self.layout_guide_drag
+            if axis == "v":
+                self.layout_guides["v"][index] = canvas_x / self.layout_zoom
+            else:
+                self.layout_guides["h"][index] = canvas_y / self.layout_zoom
+            self.layout_redraw()
+            return
         if self.layout_select_box_start:
             canvas_x = self.layout_canvas.canvasx(event.x)
             canvas_y = self.layout_canvas.canvasy(event.y)
             x0, y0 = self.layout_select_box_start
             if self.layout_select_box_id:
                 self.layout_canvas.coords(self.layout_select_box_id, x0, y0, canvas_x, canvas_y)
+            if abs(canvas_x - x0) > 2 or abs(canvas_y - y0) > 2:
+                self.layout_select_box_moved = True
             return
         if not self.layout_drag_start:
             return
@@ -2380,6 +2588,22 @@ class App:
         step_y = cell_h + pad
         snap = self.layout_snap_var.get() and self.layout_mode_var.get() == "Grid"
 
+        if self.layout_guides_enabled and not snap and self.layout_selected_ids:
+            anchor_id = self.layout_drag_anchor_id
+            if anchor_id not in self.layout_drag_positions:
+                anchor_id = next(iter(self.layout_selected_ids))
+            anchor_start = self.layout_drag_positions.get(anchor_id)
+            anchor_item = self.layout_items.get(anchor_id)
+            if anchor_start and anchor_item:
+                offset_x, offset_y = self.layout_get_anchor_offset(anchor_item)
+                anchor_x = anchor_start[0] + dx + offset_x
+                anchor_y = anchor_start[1] + dy + offset_y
+                snap_x, snap_y = self.layout_apply_guide_snap(anchor_x, anchor_y)
+                dx += snap_x - anchor_x
+                dy += snap_y - anchor_y
+
+        moved_positions = {}
+        moved = False
         for item_id in self.layout_selected_ids:
             start_x, start_y = self.layout_drag_positions.get(item_id, (0, 0))
             new_x = start_x + dx
@@ -2389,6 +2613,16 @@ class App:
                 row = int(round(new_y / step_y))
                 new_x = col * step_x
                 new_y = row * step_y
+            if new_x != start_x or new_y != start_y:
+                moved = True
+            moved_positions[item_id] = (new_x, new_y)
+
+        if moved and not self.layout_drag_moved:
+            self.layout_push_undo()
+            self.layout_drag_moved = True
+            self.layout_pending_select_id = None
+
+        for item_id, (new_x, new_y) in moved_positions.items():
             item = self.layout_items[item_id]
             item["x"] = new_x
             item["y"] = new_y
@@ -2403,37 +2637,53 @@ class App:
         self.layout_update_position_fields()
 
     def layout_on_release(self, _event):
+        if self.layout_guide_drag:
+            self.layout_guide_drag = None
+            return
         if self.layout_select_box_start:
             x0, y0 = self.layout_select_box_start
             x1, y1 = self.layout_canvas.coords(self.layout_select_box_id)[2:]
             x_min, x_max = sorted([x0, x1])
             y_min, y_max = sorted([y0, y1])
-            selected_items = self.layout_canvas.find_enclosed(x_min, y_min, x_max, y_max)
-            if not self.layout_select_box_add:
-                for selected in list(self.layout_selected_ids):
-                    self.layout_clear_selection_rect(selected)
-                self.layout_selected_ids.clear()
-            for item_id in selected_items:
-                if item_id in self.layout_items:
-                    item = self.layout_items.get(item_id)
-                    if not self.layout_item_is_visible(item):
-                        continue
-                    self.layout_selected_ids.add(item_id)
-                    self.layout_update_selection_rect(item_id)
+            if self.layout_select_box_moved:
+                selected_items = self.layout_canvas.find_enclosed(x_min, y_min, x_max, y_max)
+                if not self.layout_select_box_add:
+                    for selected in list(self.layout_selected_ids):
+                        self.layout_clear_selection_rect(selected)
+                    self.layout_selected_ids.clear()
+                for item_id in selected_items:
+                    if item_id in self.layout_items:
+                        item = self.layout_items.get(item_id)
+                        if not self.layout_item_is_visible(item):
+                            continue
+                        self.layout_selected_ids.add(item_id)
+                        self.layout_update_selection_rect(item_id)
             if self.layout_select_box_id:
                 self.layout_canvas.delete(self.layout_select_box_id)
             self.layout_select_box_start = None
             self.layout_select_box_id = None
             self.layout_select_box_add = False
+            self.layout_select_box_moved = False
             self.layout_update_position_fields()
             return
+        if self.layout_pending_select_id:
+            for selected in list(self.layout_selected_ids):
+                self.layout_clear_selection_rect(selected)
+            self.layout_selected_ids.clear()
+            self.layout_selected_ids.add(self.layout_pending_select_id)
+            self.layout_update_selection_rect(self.layout_pending_select_id)
         self.layout_drag_start = None
         self.layout_drag_positions = {}
+        self.layout_drag_moved = False
+        self.layout_drag_anchor_id = None
+        self.layout_pending_select_id = None
         self.layout_update_position_fields()
 
-    def layout_snap_selected(self):
+    def layout_snap_selected(self, record_undo=True):
         if not self.layout_snap_var.get() or self.layout_mode_var.get() != "Grid":
             return
+        if record_undo:
+            self.layout_push_undo()
         cell_w, cell_h, pad = self.layout_get_cell_and_padding()
         step_x = cell_w + pad
         step_y = cell_h + pad
@@ -2484,6 +2734,7 @@ class App:
 
         self.layout_canvas.delete("grid_line")
         self.layout_canvas.delete("guide_line")
+        self.layout_canvas.delete("snap_guide")
 
         if self.layout_show_grid_var.get() and self.layout_mode_var.get() == "Grid":
             step_x = cell_w + pad
@@ -2510,6 +2761,15 @@ class App:
             self.layout_canvas.create_line(cx, 0, cx, canvas_h, fill="#a0a0a0", dash=(4, 2), tags=("guide_line",))
             self.layout_canvas.create_line(0, cy, canvas_w, cy, fill="#a0a0a0", dash=(4, 2), tags=("guide_line",))
             self.layout_canvas.tag_lower("guide_line")
+
+        if self.layout_guides_enabled:
+            for gx in self.layout_guides.get("v", []):
+                xs = gx * self.layout_zoom
+                self.layout_canvas.create_line(xs, 0, xs, canvas_h, fill="#d97904", dash=(2, 2), tags=("snap_guide",))
+            for gy in self.layout_guides.get("h", []):
+                ys = gy * self.layout_zoom
+                self.layout_canvas.create_line(0, ys, canvas_w, ys, fill="#d97904", dash=(2, 2), tags=("snap_guide",))
+            self.layout_canvas.tag_lower("snap_guide")
 
         for item_id, item in self.layout_items.items():
             canvas_x, canvas_y = self.layout_to_canvas(item["x"], item["y"])
@@ -3085,6 +3345,23 @@ class App:
             "sheet_h": sheet_h,
         }
 
+    def split_push_undo(self, snapshot):
+        if not snapshot:
+            return
+        if self.split_undo_stack and self.split_undo_stack[-1] == snapshot:
+            return
+        self.split_undo_stack.append(snapshot)
+        if len(self.split_undo_stack) > 10:
+            self.split_undo_stack.pop(0)
+
+    def split_undo(self, _event=None):
+        if not self.split_undo_stack:
+            return
+        snapshot = self.split_undo_stack.pop()
+        self.split_cell_w_var.set(int(snapshot.get("cell_w", self.split_cell_w_var.get())))
+        self.split_cell_h_var.set(int(snapshot.get("cell_h", self.split_cell_h_var.get())))
+        self.split_redraw()
+
     def split_clear_selection(self):
         self.split_selected_cells.clear()
         self.split_redraw()
@@ -3157,6 +3434,11 @@ class App:
         hit = self.split_resize_hit(canvas_x, canvas_y)
         if hit:
             self.split_resize_axis, self.split_resize_anchor = hit
+            self.split_resize_start = (
+                int(self.split_cell_w_var.get()),
+                int(self.split_cell_h_var.get()),
+            )
+            self.split_resize_moved = False
             return
         cell = self.split_cell_from_point(canvas_x, canvas_y)
         add = bool(event.state & 0x0001)
@@ -3187,14 +3469,43 @@ class App:
         y = canvas_y / self.split_zoom
         if self.split_resize_axis == "x":
             new_w = int(round(x - self.split_resize_anchor))
-            self.split_cell_w_var.set(max(1, new_w))
+            new_w = max(1, new_w)
+            if (
+                self.split_resize_start
+                and not self.split_resize_moved
+                and new_w != self.split_resize_start[0]
+            ):
+                self.split_push_undo(
+                    {
+                        "cell_w": self.split_resize_start[0],
+                        "cell_h": self.split_resize_start[1],
+                    }
+                )
+                self.split_resize_moved = True
+            self.split_cell_w_var.set(new_w)
         else:
             new_h = int(round(y - self.split_resize_anchor))
-            self.split_cell_h_var.set(max(1, new_h))
+            new_h = max(1, new_h)
+            if (
+                self.split_resize_start
+                and not self.split_resize_moved
+                and new_h != self.split_resize_start[1]
+            ):
+                self.split_push_undo(
+                    {
+                        "cell_w": self.split_resize_start[0],
+                        "cell_h": self.split_resize_start[1],
+                    }
+                )
+                self.split_resize_moved = True
+            self.split_cell_h_var.set(new_h)
         self.split_redraw()
 
     def split_on_release(self, _event):
         self.split_resize_axis = None
+        self.split_resize_anchor = 0
+        self.split_resize_start = None
+        self.split_resize_moved = False
     def split_redraw(self):
         self.split_canvas.delete("split_grid")
         self.split_canvas.delete("split_selection")

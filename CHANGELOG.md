@@ -1,5 +1,18 @@
 # ChromaForge Release Notes
 
+## Beta 3.1.1 - 2026-01-08
+
+### Added
+- Layout Editor: undo button and Ctrl+Z support for move actions (up to 10 steps).
+- Layout Editor: keyboard nudging for selected frames (arrow keys, Shift for 4px).
+- Layout Editor: snap guide toggle with draggable guide lines.
+- Layout Editor: zoom buttons (+/-) on the canvas header.
+- Layout Editor (Split): undo for grid resize drags.
+
+### Changed
+- Layout Options panel is now scrollable so all controls are reachable at smaller window sizes.
+- Selection dragging keeps multi-select intact; clicking empty canvas clears selection.
+
 ## Beta 2.2.1 - 2026-01-07
 
 ### Added
