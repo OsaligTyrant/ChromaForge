@@ -10,7 +10,7 @@ import traceback
 import sys
 import math
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
 except Exception:
@@ -324,6 +324,23 @@ class App:
         self.layout_pos_x_var = tk.StringVar(value="")
         self.layout_pos_y_var = tk.StringVar(value="")
         self.layout_zoom = 1.0
+        self.layout_layers = []
+        self.layout_active_layer_id = None
+        self.layout_reference_layer_id = None
+        self.layout_layer_counter = 0
+        self.layout_item_counter = 0
+        self.layout_layer_drag_index = None
+        self.layout_select_box_start = None
+        self.layout_select_box_id = None
+        self.layout_select_box_add = False
+        self.layout_anchor_mode_var = tk.StringVar(value="Off")
+        self.layout_anchor_source_var = tk.StringVar(value="Auto")
+        self.layout_anchor_type_var = tk.StringVar(value="Bottom")
+        self.layout_anchor_x_var = tk.StringVar(value="")
+        self.layout_anchor_y_var = tk.StringVar(value="")
+        self.layout_anchor_padding_var = tk.IntVar(value=2)
+        self.layout_anchor_inherit_var = tk.BooleanVar(value=True)
+        self.layout_anchor_ui_lock = False
         self.split_sheet_path_var = tk.StringVar(value="")
         self.split_output_dir_var = tk.StringVar(value="")
         self.split_base_name_var = tk.StringVar(value="")
@@ -354,6 +371,7 @@ class App:
         self.folder_rows = {}
 
         self._build_ui()
+        self.layout_init_layers()
         self.refresh_folders()
         self.load_last_settings()
         self.refresh_layout_folders()
@@ -713,6 +731,7 @@ class App:
         layout_body.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=8)
         layout_body.columnconfigure(1, weight=1)
         layout_body.rowconfigure(0, weight=1)
+        layout_body.rowconfigure(1, weight=0)
         layout_main.rowconfigure(3, weight=1)
 
         layout_list_frame = ttk.LabelFrame(layout_body, text="Frames")
@@ -729,6 +748,26 @@ class App:
         ttk.Button(layout_list_buttons, text="Add Selected", command=self.layout_add_selected).grid(row=0, column=0, padx=3)
         ttk.Button(layout_list_buttons, text="Remove Selected", command=self.layout_remove_selected).grid(row=0, column=1, padx=3)
         ttk.Button(layout_list_buttons, text="Clear Canvas", command=self.layout_clear_canvas).grid(row=0, column=2, padx=3)
+
+        layout_layers_frame = ttk.LabelFrame(layout_body, text="Layers")
+        layout_layers_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 8), pady=(6, 0))
+        layout_layers_frame.columnconfigure(0, weight=1)
+        layout_layers_frame.rowconfigure(1, weight=1)
+        self.layout_layers_listbox = tk.Listbox(layout_layers_frame, height=8, exportselection=False)
+        self.layout_layers_listbox.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
+        layout_layers_scroll = ttk.Scrollbar(layout_layers_frame, orient="vertical", command=self.layout_layers_listbox.yview)
+        layout_layers_scroll.grid(row=1, column=1, sticky="ns", pady=6)
+        self.layout_layers_listbox.configure(yscrollcommand=layout_layers_scroll.set)
+        layout_layers_buttons = ttk.Frame(layout_layers_frame)
+        layout_layers_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
+        ttk.Button(layout_layers_buttons, text="New", command=self.layout_layer_create).grid(row=0, column=0, padx=3)
+        ttk.Button(layout_layers_buttons, text="Rename", command=self.layout_layer_rename).grid(row=0, column=1, padx=3)
+        ttk.Button(layout_layers_buttons, text="Delete", command=self.layout_layer_delete).grid(row=0, column=2, padx=3)
+        layout_layers_buttons2 = ttk.Frame(layout_layers_frame)
+        layout_layers_buttons2.grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
+        ttk.Button(layout_layers_buttons2, text="Assign Frames", command=self.layout_layer_assign_dialog).grid(row=0, column=0, padx=3)
+        ttk.Button(layout_layers_buttons2, text="Toggle Layer", command=self.layout_layer_toggle_visibility).grid(row=0, column=1, padx=3)
+        ttk.Button(layout_layers_buttons2, text="Set Reference", command=self.layout_layer_set_reference).grid(row=0, column=2, padx=3)
 
         layout_canvas_frame = ttk.LabelFrame(layout_body, text="Canvas")
         layout_canvas_frame.grid(row=0, column=1, sticky="nsew")
@@ -784,9 +823,67 @@ class App:
         ttk.Button(layout_align_frame, text="Center in Cell", command=self.layout_center_in_cell).grid(row=0, column=2, padx=3)
         ttk.Button(layout_align_frame, text="Copy Selected", command=self.layout_copy_selected).grid(row=0, column=3, padx=3)
         ttk.Button(layout_align_frame, text="Remove Selected", command=self.layout_remove_selected).grid(row=0, column=4, padx=3)
+        ttk.Button(layout_align_frame, text="Toggle Visible", command=self.layout_toggle_selected_visibility).grid(row=1, column=0, padx=3, pady=(4, 0))
+
+        layout_anchor_frame = ttk.LabelFrame(layout_options, text="Anchors")
+        layout_anchor_frame.grid(row=9, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
+        layout_anchor_frame.columnconfigure(1, weight=1)
+        ttk.Label(layout_anchor_frame, text="Mode").grid(row=0, column=0, sticky="w", padx=6, pady=2)
+        self.layout_anchor_mode_combo = ttk.Combobox(
+            layout_anchor_frame,
+            textvariable=self.layout_anchor_mode_var,
+            values=["Off", "Global", "Per-frame"],
+            state="readonly",
+            width=10,
+        )
+        self.layout_anchor_mode_combo.grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(layout_anchor_frame, text="Source").grid(row=0, column=2, sticky="w", padx=6, pady=2)
+        self.layout_anchor_source_combo = ttk.Combobox(
+            layout_anchor_frame,
+            textvariable=self.layout_anchor_source_var,
+            values=["Auto", "Manual"],
+            state="readonly",
+            width=10,
+        )
+        self.layout_anchor_source_combo.grid(row=0, column=3, sticky="w", padx=6, pady=2)
+        ttk.Label(layout_anchor_frame, text="Auto type").grid(row=1, column=0, sticky="w", padx=6, pady=2)
+        self.layout_anchor_type_combo = ttk.Combobox(
+            layout_anchor_frame,
+            textvariable=self.layout_anchor_type_var,
+            values=["Bottom", "Top", "Center"],
+            state="readonly",
+            width=10,
+        )
+        self.layout_anchor_type_combo.grid(row=1, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(layout_anchor_frame, text="Padding").grid(row=1, column=2, sticky="w", padx=6, pady=2)
+        self.layout_anchor_padding_spin = ttk.Spinbox(
+            layout_anchor_frame,
+            from_=0,
+            to=64,
+            textvariable=self.layout_anchor_padding_var,
+            width=6,
+        )
+        self.layout_anchor_padding_spin.grid(row=1, column=3, sticky="w", padx=6, pady=2)
+        ttk.Label(layout_anchor_frame, text="Anchor X").grid(row=2, column=0, sticky="w", padx=6, pady=2)
+        self.layout_anchor_x_entry = ttk.Entry(layout_anchor_frame, textvariable=self.layout_anchor_x_var, width=8)
+        self.layout_anchor_x_entry.grid(row=2, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(layout_anchor_frame, text="Anchor Y").grid(row=2, column=2, sticky="w", padx=6, pady=2)
+        self.layout_anchor_y_entry = ttk.Entry(layout_anchor_frame, textvariable=self.layout_anchor_y_var, width=8)
+        self.layout_anchor_y_entry.grid(row=2, column=3, sticky="w", padx=6, pady=2)
+        ttk.Checkbutton(
+            layout_anchor_frame,
+            text="Use layer anchors (selected)",
+            variable=self.layout_anchor_inherit_var,
+            command=self.layout_toggle_anchor_inherit,
+        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=2)
+        layout_anchor_buttons = ttk.Frame(layout_anchor_frame)
+        layout_anchor_buttons.grid(row=4, column=0, columnspan=4, sticky="ew", padx=6, pady=(4, 2))
+        ttk.Button(layout_anchor_buttons, text="Auto Detect", command=self.layout_anchor_auto_detect).grid(row=0, column=0, padx=3)
+        ttk.Button(layout_anchor_buttons, text="Set Manual", command=self.layout_anchor_set_manual).grid(row=0, column=1, padx=3)
+        ttk.Button(layout_anchor_buttons, text="Align to Reference", command=self.layout_anchor_align_to_reference).grid(row=0, column=2, padx=3)
 
         self.layout_sprite_options = ttk.LabelFrame(layout_options, text="Spritesheet")
-        self.layout_sprite_options.grid(row=9, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
+        self.layout_sprite_options.grid(row=10, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
         ttk.Label(self.layout_sprite_options, text="Padding").grid(row=0, column=0, sticky="w", padx=6, pady=2)
         self.layout_sprite_padding_combo = ttk.Combobox(
             self.layout_sprite_options,
@@ -800,7 +897,7 @@ class App:
         self.layout_sprite_padding_spin.grid(row=0, column=2, sticky="w", padx=6, pady=2)
 
         self.layout_tile_options = ttk.LabelFrame(layout_options, text="Tilemap")
-        self.layout_tile_options.grid(row=10, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
+        self.layout_tile_options.grid(row=11, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
         ttk.Label(self.layout_tile_options, text="Tile size mode").grid(row=0, column=0, sticky="w", padx=6, pady=2)
         self.layout_tile_size_mode_combo = ttk.Combobox(
             self.layout_tile_options,
@@ -822,7 +919,7 @@ class App:
         ttk.Checkbutton(self.layout_tile_options, text="Export metadata (CSV)", variable=self.tile_export_meta_var).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=2)
 
         layout_recent_frame = ttk.LabelFrame(layout_options, text="Recent JSON")
-        layout_recent_frame.grid(row=11, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
+        layout_recent_frame.grid(row=12, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
         layout_recent_frame.columnconfigure(1, weight=1)
         ttk.Label(layout_recent_frame, text="File").grid(row=0, column=0, sticky="w", padx=6, pady=2)
         self.layout_recent_combo = ttk.Combobox(
@@ -835,7 +932,7 @@ class App:
         ttk.Button(layout_recent_frame, text="Load", command=self.layout_load_recent_json).grid(row=0, column=2, padx=6, pady=2)
 
         layout_action_frame = ttk.Frame(layout_options)
-        layout_action_frame.grid(row=12, column=0, columnspan=2, sticky="ew", padx=6, pady=(8, 6))
+        layout_action_frame.grid(row=13, column=0, columnspan=2, sticky="ew", padx=6, pady=(8, 6))
         ttk.Button(layout_action_frame, text="Load Layout", command=self.layout_load).grid(row=0, column=0, padx=3)
         ttk.Button(layout_action_frame, text="Save Layout", command=self.layout_save).grid(row=0, column=1, padx=3)
         self.layout_export_button = ttk.Button(layout_action_frame, text="Export", command=self.layout_export)
@@ -858,6 +955,12 @@ class App:
             lambda _e: (self.update_sprite_padding_controls(), self.layout_redraw()),
         )
         self.layout_sprite_padding_spin.bind("<FocusOut>", lambda _e: self.layout_redraw())
+        self.layout_anchor_mode_combo.bind("<<ComboboxSelected>>", lambda _e: self.layout_update_anchor_settings())
+        self.layout_anchor_source_combo.bind("<<ComboboxSelected>>", lambda _e: self.layout_update_anchor_settings())
+        self.layout_anchor_type_combo.bind("<<ComboboxSelected>>", lambda _e: self.layout_update_anchor_settings())
+        self.layout_anchor_padding_spin.bind("<FocusOut>", lambda _e: self.layout_update_anchor_settings())
+        self.layout_anchor_x_entry.bind("<Return>", lambda _e: self.layout_anchor_set_manual())
+        self.layout_anchor_y_entry.bind("<Return>", lambda _e: self.layout_anchor_set_manual())
         self.layout_listbox.bind("<<ListboxSelect>>", lambda _e: self.layout_maybe_set_output_name())
         self.layout_pos_x_entry.bind("<Return>", lambda _e: self.layout_apply_position())
         self.layout_pos_y_entry.bind("<Return>", lambda _e: self.layout_apply_position())
@@ -865,6 +968,10 @@ class App:
         self.layout_canvas.bind("<B1-Motion>", self.layout_on_drag)
         self.layout_canvas.bind("<ButtonRelease-1>", self.layout_on_release)
         self.layout_canvas.bind("<MouseWheel>", self.layout_on_mousewheel)
+        self.layout_layers_listbox.bind("<<ListboxSelect>>", self.layout_on_layer_select)
+        self.layout_layers_listbox.bind("<ButtonPress-1>", self.layout_layers_on_press)
+        self.layout_layers_listbox.bind("<B1-Motion>", self.layout_layers_on_drag)
+        self.layout_layers_listbox.bind("<ButtonRelease-1>", self.layout_layers_on_release)
         self.setup_layout_dnd()
 
         split_main = ttk.Frame(self.main_split_tab, padding=10)
@@ -1085,6 +1192,8 @@ class App:
             self.split_canvas.configure(background=colors["entry_bg"], highlightbackground=colors["border"], highlightcolor=colors["border"])
         if hasattr(self, "layout_listbox"):
             self.layout_listbox.configure(background=colors["entry_bg"], foreground=colors["entry_fg"])
+        if hasattr(self, "layout_layers_listbox"):
+            self.layout_layers_listbox.configure(background=colors["entry_bg"], foreground=colors["entry_fg"])
         if hasattr(self, "folders_box"):
             self.folders_box.configure(background=colors["bg"], highlightbackground=colors["border"], highlightcolor=colors["border"], highlightthickness=1)
         if hasattr(self, "folders_canvas"):
@@ -1286,15 +1395,554 @@ class App:
             if folder_path:
                 self.layout_output_var.set(os.path.basename(folder_path))
 
+    def layout_init_layers(self):
+        if self.layout_layers:
+            return
+        self.layout_create_layer("Layer 1")
+
+    def layout_create_layer(self, name=None):
+        self.layout_layer_counter += 1
+        layer_id = f"layer_{self.layout_layer_counter}"
+        layer_name = name or f"Layer {self.layout_layer_counter}"
+        layer = {
+            "id": layer_id,
+            "name": layer_name,
+            "visible": True,
+            "anchor_mode": "Off",
+            "anchor_source": "Auto",
+            "anchor_type": "Bottom",
+            "anchor_padding": 2,
+            "anchor_x": None,
+            "anchor_y": None,
+        }
+        self.layout_layers.append(layer)
+        self.layout_active_layer_id = layer_id
+        if self.layout_reference_layer_id is None:
+            self.layout_reference_layer_id = layer_id
+        self.layout_refresh_layers_list()
+        self.layout_apply_layer_order()
+        self.layout_update_anchor_fields()
+        return layer_id
+
+    def layout_layer_create(self):
+        self.layout_create_layer()
+
+    def layout_layer_rename(self):
+        layer = self.layout_get_active_layer()
+        if not layer:
+            return
+        name = simpledialog.askstring("Rename layer", "New layer name:", initialvalue=layer["name"])
+        if not name:
+            return
+        layer["name"] = name.strip()
+        self.layout_refresh_layers_list()
+
+    def layout_layer_delete(self):
+        if not self.layout_layers:
+            return
+        if len(self.layout_layers) == 1:
+            messagebox.showinfo("Layers", "At least one layer is required.")
+            return
+        layer = self.layout_get_active_layer()
+        if not layer:
+            return
+        self.layout_layers = [l for l in self.layout_layers if l["id"] != layer["id"]]
+        fallback = self.layout_layers[0]
+        self.layout_active_layer_id = fallback["id"]
+        if self.layout_reference_layer_id == layer["id"]:
+            self.layout_reference_layer_id = fallback["id"]
+        for item in self.layout_items.values():
+            if item.get("layer_id") == layer["id"]:
+                item["layer_id"] = fallback["id"]
+        self.layout_refresh_layers_list()
+        self.layout_apply_layer_order()
+        self.layout_redraw()
+        self.layout_update_anchor_fields()
+
+    def layout_layer_toggle_visibility(self):
+        layer = self.layout_get_active_layer()
+        if not layer:
+            return
+        layer["visible"] = not layer.get("visible", True)
+        self.layout_refresh_layers_list()
+        self.layout_redraw()
+
+    def layout_layer_set_reference(self):
+        layer = self.layout_get_active_layer()
+        if not layer:
+            return
+        self.layout_reference_layer_id = layer["id"]
+        self.layout_refresh_layers_list()
+
+    def layout_layer_assign_dialog(self):
+        if not self.layout_selected_ids:
+            messagebox.showinfo("Assign frames", "Select one or more frames first.")
+            return
+        if not self.layout_layers:
+            self.layout_create_layer("Layer 1")
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Assign to layer")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.columnconfigure(0, weight=1)
+
+        ttk.Label(dialog, text="Layer").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 4))
+        layer_list = tk.Listbox(dialog, height=6, exportselection=False)
+        layer_list.grid(row=1, column=0, sticky="nsew", padx=10)
+        for layer in self.layout_layers:
+            layer_list.insert("end", layer["name"])
+        if self.layout_active_layer_id:
+            active_index = self.layout_get_layer_index(self.layout_active_layer_id)
+            if active_index is not None:
+                layer_list.selection_set(active_index)
+                layer_list.activate(active_index)
+        inherit_values = {
+            self.layout_items[item_id].get("anchor_inherit", True)
+            for item_id in self.layout_selected_ids
+            if item_id in self.layout_items
+        }
+        inherit_var = tk.BooleanVar(value=True)
+        if inherit_values:
+            inherit_var.set(len(inherit_values) == 1 and True in inherit_values)
+        ttk.Checkbutton(dialog, text="Inherit layer anchors", variable=inherit_var).grid(
+            row=2, column=0, sticky="w", padx=10, pady=(6, 4)
+        )
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.grid(row=3, column=0, sticky="e", padx=10, pady=(4, 10))
+
+        def assign_to_selected():
+            if not layer_list.curselection():
+                return
+            index = layer_list.curselection()[0]
+            target_layer = self.layout_layers[index]
+            for item_id in list(self.layout_selected_ids):
+                item = self.layout_items.get(item_id)
+                if not item:
+                    continue
+                item["layer_id"] = target_layer["id"]
+                item["anchor_inherit"] = bool(inherit_var.get())
+            self.layout_active_layer_id = target_layer["id"]
+            self.layout_refresh_layers_list()
+            self.layout_redraw()
+            dialog.destroy()
+
+        def create_layer():
+            name = simpledialog.askstring("New layer", "Layer name:")
+            if not name:
+                return
+            new_id = self.layout_create_layer(name.strip())
+            new_index = self.layout_get_layer_index(new_id)
+            if new_index is not None:
+                layer_list.insert("end", name.strip())
+                layer_list.selection_clear(0, "end")
+                layer_list.selection_set(new_index)
+                layer_list.activate(new_index)
+
+        ttk.Button(button_frame, text="New Layer", command=create_layer).grid(row=0, column=0, padx=4)
+        ttk.Button(button_frame, text="Assign", command=assign_to_selected).grid(row=0, column=1, padx=4)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).grid(row=0, column=2, padx=4)
+
+    def layout_get_layer_index(self, layer_id):
+        for index, layer in enumerate(self.layout_layers):
+            if layer["id"] == layer_id:
+                return index
+        return None
+
+    def layout_get_layer_by_id(self, layer_id):
+        for layer in self.layout_layers:
+            if layer["id"] == layer_id:
+                return layer
+        return None
+
+    def layout_get_active_layer(self):
+        if not self.layout_layers:
+            return None
+        if not self.layout_active_layer_id:
+            self.layout_active_layer_id = self.layout_layers[0]["id"]
+        return self.layout_get_layer_by_id(self.layout_active_layer_id)
+
+    def layout_refresh_layers_list(self):
+        if not hasattr(self, "layout_layers_listbox"):
+            return
+        self.layout_layers_listbox.delete(0, "end")
+        for layer in self.layout_layers:
+            visible = "[x]" if layer.get("visible", True) else "[ ]"
+            ref = "*" if layer["id"] == self.layout_reference_layer_id else " "
+            self.layout_layers_listbox.insert("end", f"{visible} {ref} {layer['name']}")
+        if self.layout_active_layer_id:
+            index = self.layout_get_layer_index(self.layout_active_layer_id)
+            if index is not None:
+                self.layout_layers_listbox.selection_set(index)
+                self.layout_layers_listbox.activate(index)
+
+    def layout_layers_on_press(self, event):
+        index = self.layout_layers_listbox.nearest(event.y)
+        if index >= 0:
+            self.layout_layer_drag_index = index
+            self.layout_layers_listbox.selection_clear(0, "end")
+            self.layout_layers_listbox.selection_set(index)
+            self.layout_layers_listbox.activate(index)
+            layer = self.layout_layers[index]
+            self.layout_active_layer_id = layer["id"]
+            self.layout_update_anchor_fields()
+
+    def layout_layers_on_drag(self, event):
+        if self.layout_layer_drag_index is None:
+            return
+        target = self.layout_layers_listbox.nearest(event.y)
+        if target < 0 or target == self.layout_layer_drag_index:
+            return
+        layer = self.layout_layers.pop(self.layout_layer_drag_index)
+        self.layout_layers.insert(target, layer)
+        self.layout_layer_drag_index = target
+        self.layout_refresh_layers_list()
+        self.layout_apply_layer_order()
+
+    def layout_layers_on_release(self, _event):
+        self.layout_layer_drag_index = None
+
+    def layout_on_layer_select(self, _event=None):
+        selection = self.layout_layers_listbox.curselection()
+        if not selection:
+            return
+        layer = self.layout_layers[selection[0]]
+        self.layout_active_layer_id = layer["id"]
+        self.layout_update_anchor_fields()
+
+    def layout_apply_layer_order(self):
+        if not hasattr(self, "layout_canvas"):
+            return
+        order_map = {layer["id"]: idx for idx, layer in enumerate(self.layout_layers)}
+        sorted_items = sorted(
+            self.layout_items.items(),
+            key=lambda item: (
+                order_map.get(item[1].get("layer_id"), 0),
+                item[1].get("order", 0),
+            ),
+        )
+        for item_id, _item in sorted_items:
+            self.layout_canvas.tag_raise(item_id)
+        for item_id in self.layout_selected_ids:
+            item = self.layout_items.get(item_id)
+            if item and item.get("rect_id"):
+                self.layout_canvas.tag_raise(item["rect_id"])
+
+    def layout_item_is_visible(self, item):
+        if not item:
+            return False
+        layer = self.layout_get_layer_by_id(item.get("layer_id"))
+        if layer and not layer.get("visible", True):
+            return False
+        return item.get("visible", True)
+
+    def layout_get_ordered_items(self, include_hidden=False):
+        order_map = {layer["id"]: idx for idx, layer in enumerate(self.layout_layers)}
+        ordered = sorted(
+            self.layout_items.values(),
+            key=lambda item: (
+                order_map.get(item.get("layer_id"), 0),
+                item.get("order", 0),
+            ),
+        )
+        if include_hidden:
+            return ordered
+        return [item for item in ordered if self.layout_item_is_visible(item)]
+
     def layout_update_position_fields(self):
         if not self.layout_selected_ids:
             self.layout_pos_x_var.set("")
             self.layout_pos_y_var.set("")
+            self.layout_update_anchor_fields()
             return
         xs = {int(self.layout_items[item_id]["x"]) for item_id in self.layout_selected_ids}
         ys = {int(self.layout_items[item_id]["y"]) for item_id in self.layout_selected_ids}
         self.layout_pos_x_var.set(str(xs.pop()) if len(xs) == 1 else "")
         self.layout_pos_y_var.set(str(ys.pop()) if len(ys) == 1 else "")
+        self.layout_update_anchor_fields()
+
+    def layout_update_anchor_fields(self):
+        layer = self.layout_get_active_layer()
+        if not layer or self.layout_anchor_ui_lock:
+            return
+        self.layout_anchor_ui_lock = True
+        try:
+            self.layout_anchor_mode_var.set(layer.get("anchor_mode", "Off"))
+            self.layout_anchor_source_var.set(layer.get("anchor_source", "Auto"))
+            self.layout_anchor_type_var.set(layer.get("anchor_type", "Bottom"))
+            self.layout_anchor_padding_var.set(int(layer.get("anchor_padding", 2)))
+            anchor_x = ""
+            anchor_y = ""
+            if layer.get("anchor_mode") == "Global":
+                if layer.get("anchor_x") is not None:
+                    anchor_x = str(int(layer.get("anchor_x")))
+                if layer.get("anchor_y") is not None:
+                    anchor_y = str(int(layer.get("anchor_y")))
+            elif layer.get("anchor_mode") == "Per-frame" and len(self.layout_selected_ids) == 1:
+                item_id = next(iter(self.layout_selected_ids))
+                item = self.layout_items.get(item_id)
+                if item and item.get("anchor"):
+                    anchor_x = str(int(item["anchor"]["x"]))
+                    anchor_y = str(int(item["anchor"]["y"]))
+            self.layout_anchor_x_var.set(anchor_x)
+            self.layout_anchor_y_var.set(anchor_y)
+
+            inherit_values = {
+                self.layout_items[item_id].get("anchor_inherit", True)
+                for item_id in self.layout_selected_ids
+                if item_id in self.layout_items
+            }
+            if not inherit_values:
+                self.layout_anchor_inherit_var.set(True)
+            else:
+                self.layout_anchor_inherit_var.set(len(inherit_values) == 1 and True in inherit_values)
+        finally:
+            self.layout_anchor_ui_lock = False
+
+    def layout_update_anchor_settings(self):
+        layer = self.layout_get_active_layer()
+        if not layer:
+            return
+        if self.layout_anchor_ui_lock:
+            return
+        layer["anchor_mode"] = self.layout_anchor_mode_var.get()
+        layer["anchor_source"] = self.layout_anchor_source_var.get()
+        layer["anchor_type"] = self.layout_anchor_type_var.get()
+        layer["anchor_padding"] = int(self.layout_anchor_padding_var.get())
+        self.layout_update_anchor_fields()
+
+    def layout_toggle_anchor_inherit(self):
+        if not self.layout_selected_ids:
+            return
+        value = bool(self.layout_anchor_inherit_var.get())
+        for item_id in self.layout_selected_ids:
+            item = self.layout_items.get(item_id)
+            if not item:
+                continue
+            item["anchor_inherit"] = value
+        self.layout_update_anchor_fields()
+
+    def layout_toggle_selected_visibility(self):
+        if not self.layout_selected_ids:
+            return
+        for item_id in list(self.layout_selected_ids):
+            item = self.layout_items.get(item_id)
+            if not item:
+                continue
+            item["visible"] = not item.get("visible", True)
+            if not item["visible"]:
+                self.layout_clear_selection_rect(item_id)
+                self.layout_selected_ids.discard(item_id)
+        self.layout_redraw()
+
+    def layout_compute_auto_anchor(self, pil, anchor_type, padding):
+        if pil is None:
+            return None
+        alpha = pil.split()[-1]
+        threshold = 5
+        mask = alpha.point(lambda v: 255 if v > threshold else 0)
+        bbox = mask.getbbox()
+        if not bbox:
+            return None
+        left, top, right, bottom = bbox
+        right -= 1
+        bottom -= 1
+        center_x = (left + right) / 2
+        if anchor_type == "Top":
+            anchor_y = top + padding
+        elif anchor_type == "Center":
+            anchor_y = (top + bottom) / 2
+        else:
+            anchor_y = bottom - padding
+        anchor_x = center_x
+        anchor_x = max(0, min(pil.width - 1, anchor_x))
+        anchor_y = max(0, min(pil.height - 1, anchor_y))
+        return {
+            "x": int(round(anchor_x)),
+            "y": int(round(anchor_y)),
+        }
+
+    def layout_get_item_anchor(self, item, layer, compute_auto=False):
+        if not item.get("anchor_inherit", True):
+            return item.get("anchor")
+        mode = layer.get("anchor_mode", "Off")
+        if mode == "Off":
+            return None
+        source = layer.get("anchor_source", "Auto")
+        if mode == "Global":
+            if source == "Manual":
+                if layer.get("anchor_x") is None or layer.get("anchor_y") is None:
+                    return None
+                return {"x": int(layer.get("anchor_x")), "y": int(layer.get("anchor_y"))}
+            if not compute_auto:
+                return None
+            if layer.get("anchor_x") is not None and layer.get("anchor_y") is not None:
+                return {"x": int(layer.get("anchor_x")), "y": int(layer.get("anchor_y"))}
+            anchor = self.layout_compute_auto_anchor(
+                item["pil"],
+                layer.get("anchor_type", "Bottom"),
+                int(layer.get("anchor_padding", 2)),
+            )
+            if anchor:
+                layer["anchor_x"] = anchor["x"]
+                layer["anchor_y"] = anchor["y"]
+            return anchor
+        if mode == "Per-frame":
+            if source == "Manual":
+                return item.get("anchor")
+            if not compute_auto:
+                return item.get("anchor")
+            anchor = self.layout_compute_auto_anchor(
+                item["pil"],
+                layer.get("anchor_type", "Bottom"),
+                int(layer.get("anchor_padding", 2)),
+            )
+            if anchor:
+                item["anchor"] = anchor
+            return anchor
+        return None
+
+    def layout_anchor_auto_detect(self):
+        layer = self.layout_get_active_layer()
+        if not layer:
+            return
+        mode = layer.get("anchor_mode", "Off")
+        if mode == "Off":
+            messagebox.showinfo("Anchors", "Set anchor mode to Global or Per-frame first.")
+            return
+        target_ids = list(self.layout_selected_ids) if self.layout_selected_ids else [
+            item_id for item_id, item in self.layout_items.items() if item.get("layer_id") == layer["id"]
+        ]
+        if not target_ids:
+            messagebox.showinfo("Anchors", "No frames available to detect anchors.")
+            return
+        if mode == "Global":
+            item = self.layout_items[target_ids[0]]
+            anchor = self.layout_compute_auto_anchor(
+                item["pil"],
+                layer.get("anchor_type", "Bottom"),
+                int(layer.get("anchor_padding", 2)),
+            )
+            if not anchor:
+                return
+            layer["anchor_x"] = anchor["x"]
+            layer["anchor_y"] = anchor["y"]
+        else:
+            for item_id in target_ids:
+                item = self.layout_items.get(item_id)
+                if not item:
+                    continue
+                anchor = self.layout_compute_auto_anchor(
+                    item["pil"],
+                    layer.get("anchor_type", "Bottom"),
+                    int(layer.get("anchor_padding", 2)),
+                )
+                if anchor:
+                    item["anchor"] = anchor
+        self.layout_update_anchor_fields()
+
+    def layout_anchor_set_manual(self):
+        layer = self.layout_get_active_layer()
+        if not layer:
+            return
+        mode = layer.get("anchor_mode", "Off")
+        if mode == "Off":
+            messagebox.showinfo("Anchors", "Set anchor mode to Global or Per-frame first.")
+            return
+        try:
+            anchor_x = int(self.layout_anchor_x_var.get())
+            anchor_y = int(self.layout_anchor_y_var.get())
+        except ValueError:
+            messagebox.showerror("Anchors", "Anchor X/Y must be whole numbers.")
+            return
+        if mode == "Global":
+            layer["anchor_x"] = anchor_x
+            layer["anchor_y"] = anchor_y
+        else:
+            if not self.layout_selected_ids:
+                messagebox.showinfo("Anchors", "Select frames to set per-frame anchors.")
+                return
+            for item_id in self.layout_selected_ids:
+                item = self.layout_items.get(item_id)
+                if not item:
+                    continue
+                item["anchor"] = {"x": anchor_x, "y": anchor_y}
+        self.layout_update_anchor_fields()
+
+    def layout_anchor_align_to_reference(self):
+        if self.layout_mode_var.get() != "Grid":
+            messagebox.showinfo("Anchors", "Anchor alignment requires Grid mode.")
+            return
+        if not self.layout_reference_layer_id:
+            messagebox.showinfo("Anchors", "Select a reference layer first.")
+            return
+        active_layer = self.layout_get_active_layer()
+        if not active_layer:
+            return
+        if active_layer.get("anchor_mode", "Off") == "Off":
+            messagebox.showinfo("Anchors", "Enable anchors for the active layer first.")
+            return
+        if active_layer["id"] == self.layout_reference_layer_id:
+            messagebox.showinfo("Anchors", "Active layer is already the reference layer.")
+            return
+
+        ref_layer = self.layout_get_layer_by_id(self.layout_reference_layer_id)
+        if not ref_layer:
+            messagebox.showinfo("Anchors", "Reference layer not found.")
+            return
+
+        cell_w, cell_h, pad = self.layout_get_cell_and_padding()
+        step_x = cell_w + pad
+        step_y = cell_h + pad
+        if step_x <= 0 or step_y <= 0:
+            return
+
+        ref_anchors = {}
+        for item in self.layout_items.values():
+            if item.get("layer_id") != ref_layer["id"]:
+                continue
+            anchor = self.layout_get_item_anchor(item, ref_layer, compute_auto=True)
+            if not anchor:
+                continue
+            col = int(round(item["x"] / step_x))
+            row = int(round(item["y"] / step_y))
+            ref_anchors[(row, col)] = (item["x"] + anchor["x"], item["y"] + anchor["y"])
+
+        if not ref_anchors:
+            messagebox.showinfo("Anchors", "Reference layer has no anchors to align to.")
+            return
+
+        target_ids = list(self.layout_selected_ids) if self.layout_selected_ids else [
+            item_id for item_id, item in self.layout_items.items() if item.get("layer_id") == active_layer["id"]
+        ]
+        moved = False
+        for item_id in target_ids:
+            item = self.layout_items.get(item_id)
+            if not item or item.get("layer_id") != active_layer["id"]:
+                continue
+            anchor = self.layout_get_item_anchor(item, active_layer, compute_auto=True)
+            if not anchor:
+                continue
+            col = int(round(item["x"] / step_x))
+            row = int(round(item["y"] / step_y))
+            ref_anchor = ref_anchors.get((row, col))
+            if not ref_anchor:
+                continue
+            current_anchor = (item["x"] + anchor["x"], item["y"] + anchor["y"])
+            delta_x = ref_anchor[0] - current_anchor[0]
+            delta_y = ref_anchor[1] - current_anchor[1]
+            item["x"] += delta_x
+            item["y"] += delta_y
+            moved = True
+            canvas_x, canvas_y = self.layout_to_canvas(item["x"], item["y"])
+            self.layout_canvas.coords(item_id, canvas_x, canvas_y)
+            if item.get("rect_id"):
+                width = item["width"] * self.layout_zoom
+                height = item["height"] * self.layout_zoom
+                self.layout_canvas.coords(item["rect_id"], canvas_x, canvas_y, canvas_x + width, canvas_y + height)
+        if moved:
+            self.layout_redraw()
+            self.layout_update_position_fields()
 
     def layout_apply_position(self):
         if not self.layout_selected_ids:
@@ -1500,10 +2148,15 @@ class App:
         extra_sizes = [(item[4], item[5]) for item in new_items]
         cell_w, cell_h, pad = self.layout_get_cell_and_padding(extra_sizes=extra_sizes)
         start_index = len(self.layout_items)
+        layer = self.layout_get_active_layer()
+        if not layer:
+            self.layout_create_layer("Layer 1")
+            layer = self.layout_get_active_layer()
         for i, (file, path, pil, photo, width, height) in enumerate(new_items):
             x, y = self.layout_next_position(start_index + i, cell_w, cell_h, pad)
             canvas_x, canvas_y = self.layout_to_canvas(x, y)
             item_id = self.layout_canvas.create_image(canvas_x, canvas_y, anchor="nw", image=photo, tags=("layout_item",))
+            self.layout_item_counter += 1
             self.layout_items[item_id] = {
                 "file": file,
                 "path": path,
@@ -1514,6 +2167,11 @@ class App:
                 "width": width,
                 "height": height,
                 "rect_id": None,
+                "layer_id": layer["id"],
+                "visible": True,
+                "anchor_inherit": True,
+                "anchor": None,
+                "order": self.layout_item_counter,
             }
         self.layout_redraw()
         self.layout_maybe_set_output_name()
@@ -1577,6 +2235,7 @@ class App:
                 image=photo,
                 tags=("layout_item",),
             )
+            self.layout_item_counter += 1
             self.layout_items[new_id] = {
                 "file": item["file"],
                 "path": item["path"],
@@ -1587,6 +2246,11 @@ class App:
                 "width": item["width"],
                 "height": item["height"],
                 "rect_id": None,
+                "layer_id": item.get("layer_id"),
+                "visible": item.get("visible", True),
+                "anchor_inherit": item.get("anchor_inherit", True),
+                "anchor": item.get("anchor"),
+                "order": self.layout_item_counter,
             }
             new_ids.append(new_id)
         for new_id in new_ids:
@@ -1609,12 +2273,19 @@ class App:
         items = self.layout_canvas.find_overlapping(x, y, x, y)
         for item_id in reversed(items):
             if item_id in self.layout_items:
+                item = self.layout_items.get(item_id)
+                if not self.layout_item_is_visible(item):
+                    continue
                 return item_id
         return None
 
     def layout_update_selection_rect(self, item_id):
         item = self.layout_items.get(item_id)
         if not item:
+            return
+        if not self.layout_item_is_visible(item):
+            self.layout_clear_selection_rect(item_id)
+            self.layout_selected_ids.discard(item_id)
             return
         x, y = self.layout_to_canvas(item["x"], item["y"])
         width = item["width"] * self.layout_zoom
@@ -1660,11 +2331,24 @@ class App:
         canvas_y = self.layout_canvas.canvasy(event.y)
         item_id = self.layout_find_item_at(canvas_x, canvas_y)
         if not item_id:
-            for selected in list(self.layout_selected_ids):
-                self.layout_clear_selection_rect(selected)
-            self.layout_selected_ids.clear()
-            self.layout_update_position_fields()
+            add = bool(event.state & 0x0004)
+            if not add:
+                for selected in list(self.layout_selected_ids):
+                    self.layout_clear_selection_rect(selected)
+                self.layout_selected_ids.clear()
+                self.layout_update_position_fields()
             self.layout_drag_start = None
+            self.layout_select_box_start = (canvas_x, canvas_y)
+            self.layout_select_box_add = add
+            self.layout_select_box_id = self.layout_canvas.create_rectangle(
+                canvas_x,
+                canvas_y,
+                canvas_x,
+                canvas_y,
+                outline="#3d7bfd",
+                dash=(3, 2),
+                tags=("selection_box",),
+            )
             return
         add = bool(event.state & 0x0001)
         toggle = bool(event.state & 0x0004)
@@ -1677,6 +2361,13 @@ class App:
         }
 
     def layout_on_drag(self, event):
+        if self.layout_select_box_start:
+            canvas_x = self.layout_canvas.canvasx(event.x)
+            canvas_y = self.layout_canvas.canvasy(event.y)
+            x0, y0 = self.layout_select_box_start
+            if self.layout_select_box_id:
+                self.layout_canvas.coords(self.layout_select_box_id, x0, y0, canvas_x, canvas_y)
+            return
         if not self.layout_drag_start:
             return
         canvas_x = self.layout_canvas.canvasx(event.x)
@@ -1712,6 +2403,30 @@ class App:
         self.layout_update_position_fields()
 
     def layout_on_release(self, _event):
+        if self.layout_select_box_start:
+            x0, y0 = self.layout_select_box_start
+            x1, y1 = self.layout_canvas.coords(self.layout_select_box_id)[2:]
+            x_min, x_max = sorted([x0, x1])
+            y_min, y_max = sorted([y0, y1])
+            selected_items = self.layout_canvas.find_enclosed(x_min, y_min, x_max, y_max)
+            if not self.layout_select_box_add:
+                for selected in list(self.layout_selected_ids):
+                    self.layout_clear_selection_rect(selected)
+                self.layout_selected_ids.clear()
+            for item_id in selected_items:
+                if item_id in self.layout_items:
+                    item = self.layout_items.get(item_id)
+                    if not self.layout_item_is_visible(item):
+                        continue
+                    self.layout_selected_ids.add(item_id)
+                    self.layout_update_selection_rect(item_id)
+            if self.layout_select_box_id:
+                self.layout_canvas.delete(self.layout_select_box_id)
+            self.layout_select_box_start = None
+            self.layout_select_box_id = None
+            self.layout_select_box_add = False
+            self.layout_update_position_fields()
+            return
         self.layout_drag_start = None
         self.layout_drag_positions = {}
         self.layout_update_position_fields()
@@ -1799,13 +2514,18 @@ class App:
         for item_id, item in self.layout_items.items():
             canvas_x, canvas_y = self.layout_to_canvas(item["x"], item["y"])
             self.layout_canvas.coords(item_id, canvas_x, canvas_y)
+            if self.layout_item_is_visible(item):
+                self.layout_canvas.itemconfigure(item_id, state="normal")
+            else:
+                self.layout_canvas.itemconfigure(item_id, state="hidden")
             if item.get("rect_id"):
                 width = item["width"] * self.layout_zoom
                 height = item["height"] * self.layout_zoom
                 self.layout_canvas.coords(item["rect_id"], canvas_x, canvas_y, canvas_x + width, canvas_y + height)
 
-        for item_id in self.layout_selected_ids:
+        for item_id in list(self.layout_selected_ids):
             self.layout_update_selection_rect(item_id)
+        self.layout_apply_layer_order()
 
     def layout_export(self):
         if self.running or self.previewing or self.sheet_running or self.tile_running:
@@ -1817,6 +2537,10 @@ class App:
             return
         if not self.layout_items:
             messagebox.showerror("No frames", "Add frames to the canvas first.")
+            return
+        visible_items = self.layout_get_ordered_items()
+        if not visible_items:
+            messagebox.showerror("No visible frames", "All frames are hidden.")
             return
         output_name = self.layout_output_var.get().strip()
         if not output_name:
@@ -1831,14 +2555,14 @@ class App:
         cell_w, cell_h, pad = self.layout_get_cell_and_padding()
         cols = max(1, int(self.layout_grid_columns_var.get()))
         rows = int(self.layout_grid_rows_var.get())
-        max_x = max((item["x"] + item["width"]) for item in self.layout_items.values())
-        max_y = max((item["y"] + item["height"]) for item in self.layout_items.values())
+        max_x = max((item["x"] + item["width"]) for item in visible_items)
+        max_y = max((item["y"] + item["height"]) for item in visible_items)
 
         if self.layout_mode_var.get() == "Grid":
             step_x = cell_w + pad
             step_y = cell_h + pad
             if rows <= 0 and step_x > 0 and step_y > 0:
-                row_indices = [int(item["y"] // step_y) for item in self.layout_items.values()]
+                row_indices = [int(item["y"] // step_y) for item in visible_items]
                 rows = max(row_indices) + 1 if row_indices else 1
             if rows <= 0:
                 rows = 1
@@ -1862,7 +2586,7 @@ class App:
         out_path = os.path.join(out_dir, out_name)
         canvas = Image.new("RGBA", (out_w, out_h), (0, 0, 0, 0))
         metadata = []
-        for item in self.layout_items.values():
+        for item in visible_items:
             try:
                 with Image.open(item["path"]) as img:
                     img = img.convert("RGBA")
@@ -1901,6 +2625,22 @@ class App:
             "tile_size_mode": self.tile_size_mode_var.get(),
             "tile_size": self.tile_size_var.get(),
             "tile_export_meta": self.tile_export_meta_var.get(),
+            "layers": [
+                {
+                    "id": layer["id"],
+                    "name": layer["name"],
+                    "visible": layer.get("visible", True),
+                    "anchor_mode": layer.get("anchor_mode", "Off"),
+                    "anchor_source": layer.get("anchor_source", "Auto"),
+                    "anchor_type": layer.get("anchor_type", "Bottom"),
+                    "anchor_padding": layer.get("anchor_padding", 2),
+                    "anchor_x": layer.get("anchor_x"),
+                    "anchor_y": layer.get("anchor_y"),
+                }
+                for layer in self.layout_layers
+            ],
+            "active_layer_id": self.layout_active_layer_id,
+            "reference_layer_id": self.layout_reference_layer_id,
             "items": [
                 {
                     "file": item["file"],
@@ -1908,6 +2648,11 @@ class App:
                     "y": int(item["y"]),
                     "width": int(item["width"]),
                     "height": int(item["height"]),
+                    "layer_id": item.get("layer_id"),
+                    "visible": item.get("visible", True),
+                    "anchor_inherit": item.get("anchor_inherit", True),
+                    "anchor": item.get("anchor"),
+                    "order": item.get("order", 0),
                 }
                 for item in self.layout_items.values()
             ],
@@ -1970,10 +2715,51 @@ class App:
         self.update_layout_type_controls()
         self.refresh_layout_folders()
 
+        self.layout_layers = []
+        self.layout_layer_counter = 0
+        self.layout_active_layer_id = None
+        self.layout_reference_layer_id = None
+        max_layer_index = 0
+        for layer_data in data.get("layers", []):
+            layer_id = layer_data.get("id")
+            if not layer_id:
+                self.layout_layer_counter += 1
+                layer_id = f"layer_{self.layout_layer_counter}"
+            else:
+                if layer_id.startswith("layer_"):
+                    suffix = layer_id.split("_", 1)[1]
+                    if suffix.isdigit():
+                        max_layer_index = max(max_layer_index, int(suffix))
+            self.layout_layers.append(
+                {
+                    "id": layer_id,
+                    "name": layer_data.get("name") or layer_id,
+                    "visible": layer_data.get("visible", True),
+                    "anchor_mode": layer_data.get("anchor_mode", "Off"),
+                    "anchor_source": layer_data.get("anchor_source", "Auto"),
+                    "anchor_type": layer_data.get("anchor_type", "Bottom"),
+                    "anchor_padding": int(layer_data.get("anchor_padding", 2)),
+                    "anchor_x": layer_data.get("anchor_x"),
+                    "anchor_y": layer_data.get("anchor_y"),
+                }
+            )
+        if max_layer_index:
+            self.layout_layer_counter = max(self.layout_layer_counter, max_layer_index)
+        if not self.layout_layers:
+            self.layout_create_layer("Layer 1")
+        self.layout_active_layer_id = data.get("active_layer_id") or self.layout_layers[0]["id"]
+        if not self.layout_get_layer_by_id(self.layout_active_layer_id):
+            self.layout_active_layer_id = self.layout_layers[0]["id"]
+        self.layout_reference_layer_id = data.get("reference_layer_id") or self.layout_layers[0]["id"]
+        if not self.layout_get_layer_by_id(self.layout_reference_layer_id):
+            self.layout_reference_layer_id = self.layout_layers[0]["id"]
+        self.layout_refresh_layers_list()
+
         self.layout_clear_canvas()
         folder_path = self.layout_get_folder_path()
         if not folder_path:
             return
+        self.layout_item_counter = 0
         for item in data.get("items", []):
             file = item.get("file")
             if not file:
@@ -1993,6 +2779,13 @@ class App:
             y = int(item.get("y", 0))
             canvas_x, canvas_y = self.layout_to_canvas(x, y)
             item_id = self.layout_canvas.create_image(canvas_x, canvas_y, anchor="nw", image=photo, tags=("layout_item",))
+            order = int(item.get("order", 0))
+            if order <= 0:
+                self.layout_item_counter += 1
+                order = self.layout_item_counter
+            else:
+                self.layout_item_counter = max(self.layout_item_counter, order)
+            layer_id = item.get("layer_id") or self.layout_active_layer_id
             self.layout_items[item_id] = {
                 "file": file,
                 "path": item_path,
@@ -2003,8 +2796,14 @@ class App:
                 "width": width,
                 "height": height,
                 "rect_id": None,
+                "layer_id": layer_id,
+                "visible": item.get("visible", True),
+                "anchor_inherit": item.get("anchor_inherit", True),
+                "anchor": item.get("anchor"),
+                "order": order,
             }
         self.layout_redraw()
+        self.layout_update_anchor_fields()
         self.layout_refresh_recent_jsons()
         if hasattr(self, "layout_recent_combo"):
             input_root = self.input_var.get().strip()
